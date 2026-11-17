@@ -17,6 +17,10 @@ import sys
 BLOG = 'https://blog.kate.land/posts/using-voltage-glitching-to-unlock-the-a100/'
 OPTIONS_SOURCE = 'https://github.com/kate-land/ga100vfi/blob/main/gpu0-registers/crates/gpu0-capture/data/ga100-options.json'
 CORE_SOURCE = 'https://github.com/kate-land/ga100vfi/blob/main/gpu0-registers/crates/gpu0-capture/data/ga100-core.json'
+FF_TYPE_BIT = 5
+IFF_TYPE_MASK = 1 << FF_TYPE_BIT
+FF_CHAIN_MASK = IFF_TYPE_MASK - 1
+SPARE_FF_ROWS = 16  # Software policy; not a verified hardware minimum.
 # name: chain, first bit, width, public option register address.
 # The locations are empirical mappings published by Kate, not official mappings.
 FIELDS = {
@@ -271,6 +275,9 @@ def public_spec():
     return {
         'sources': {'ff_locations': BLOG, 'register_offsets': OPTIONS_SOURCE,
                     'controller_status': CORE_SOURCE},
+        'record_format': {'type_bit': FF_TYPE_BIT, 'iff_type_mask': IFF_TYPE_MASK,
+                          'ff_chain_mask': FF_CHAIN_MASK,
+                          'boundary': 'first observed type-bit-5 record; zeros do not establish IFF start'},
         'fields': {name: {'chain': chain, 'first_bit': bit, 'width': width,
                           'option': option_name(name), 'option_offset': hex(offset),
                           **(GEN4_REGISTER_BIT if name == 'GEN4_DISABLE' else {}),
@@ -362,11 +369,11 @@ def decode(rows):
         require(value & 0xffff0000 != 0xbadf0000, f'PRI error response in FF row {row}')
         if value == 0xffffffff:
             raise PublicDecodeGap(f'Unsupported all-ones FF row {row}; no invalidation rule assumed')
-        if value & 32:
+        if value & IFF_TYPE_MASK:
             return blocks, last+1, row  # Nothing after the first IFF marker is interpreted as FF.
         if value == 0:
             continue
-        chain, block = value & 31, (value >> 6) & 1023
+        chain, block = value & FF_CHAIN_MASK, (value >> 6) & 1023
         if chain in (0, 31):
             raise PublicDecodeGap(f'Unclassified chain-{chain} record in row {row}; public-only model will not guess')
         blocks[chain, block] = value >> 16
@@ -528,7 +535,7 @@ def make_plan(baseline, groups, repeat=None, defects=None):
     if not missing:
         changed = [(key, data) for key, data in sorted(new.items()) if data != old.get(key, 0)]
         # Reserve 16 rows as a software planning policy, not a hardware specification.
-        require(start+len(changed)+16 <= boundary, 'Insufficient observed trailing FF space')
+        require(start+len(changed)+SPARE_FF_ROWS <= boundary, 'Insufficient observed trailing FF space')
         for i, ((chain, block), data) in enumerate(changed):
             require((chain, block) in old, 'Touched block has no explicit original record; default bits are unverified')
             row = start+i
@@ -562,7 +569,20 @@ def make_plan(baseline, groups, repeat=None, defects=None):
         'status': 'incomplete' if missing else 'logical-plan-complete',
         'missing_evidence': sorted(set(missing)), 'field_edits': edits, 'records': records,
         'register_effects': register_effects(edits, opts),
-        'iff_boundary': boundary, 'physical_defect_aliases_verified': False,
+        'iff_boundary': boundary,
+        'ff_boundary_evidence': {
+            'source': 'first observed raw record with bit 5 set',
+            'type_bit': FF_TYPE_BIT, 'type_mask': IFF_TYPE_MASK,
+            'first_iff_row': boundary,
+            'first_iff_word': rows[boundary] if boundary is not None else None,
+            'last_occupied_ff_row': start-1 if start is not None else None,
+            'observed_trailing_blank_rows': boundary-start if boundary is not None else None,
+            'remaining_blank_rows_after_plan': boundary-start-len(records) if boundary is not None else None,
+            'software_reserved_rows': SPARE_FF_ROWS,
+            'iff_register_checked': False,
+            'eight_zero_rule_assumed': False,
+        },
+        'physical_defect_aliases_verified': False,
         'programming_eligibility_established': False,
         'limitations': ['Public defect option values are not independently checked against physical aliases.',
                         'Gen3 block-39 ambiguity is unresolved; clearing MAGIC_D[25] alone does not establish working Gen4.',
@@ -581,7 +601,7 @@ def validate_records(records, rows, start, boundary, allow_gen3_pair=False):
         row, chain, block = record['row'], record['chain'], record['block']
         data, encoded = record['new_block'], record['word']
         require(type(encoded) is int and 0 <= encoded <= 0xffffffff, 'Invalid 32-bit FF encoding')
-        require(encoded & 32 == 0, 'IFF-type word is not an FF replacement record')
+        require(encoded & IFF_TYPE_MASK == 0, 'IFF-type word is not an FF replacement record')
         require(type(chain) is int and chain in (1, 2) and type(block) is int and 0 <= block < 1024
                 and type(data) is int and 0 <= data < 65536, 'Invalid FF record fields')
         require(encoded == (data << 16) | (block << 6) | chain, 'FF encoding does not match its fields')

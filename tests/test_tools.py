@@ -219,6 +219,56 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(boundary, 223)
         self.assertEqual(blocks, {(1, 5): 1})
 
+    def test_type_bit_with_nonzero_payload_and_chain_ends_ff(self):
+        marker=0xabcd05e7  # Bit5 set, plus a nonzero payload, block and chain.
+        rows={222:(1<<16)|(5<<6)|1,223:marker,224:(2<<16)|(5<<6)|1}
+        blocks,_,boundary=p.decode(rows)
+        self.assertEqual(boundary,223)
+        self.assertEqual(blocks,{(1,5):1})
+        observed=c.ff_boundary_observation([0]*222+[rows[222],marker,rows[224]])
+        self.assertEqual(observed['first_iff_row'],223)
+        self.assertEqual(observed['first_iff_word'],'0xabcd05e7')
+
+    def test_eight_zero_rows_do_not_invent_an_iff_boundary(self):
+        rows={row:0 for row in range(222,234)}
+        rows[222]=(1<<16)|(5<<6)|1
+        rows[231]=(2<<16)|(5<<6)|1
+        rows[233]=1<<5
+        blocks,start,boundary=p.decode(rows)
+        self.assertEqual((blocks,start,boundary),({(1,5):2},232,233))
+
+    def test_early_iff_boundary_rejects_insufficient_ff_capacity(self):
+        # Push the last occupied FF row to 303, then put IFF at 310, not 488.
+        self.io.rows[303]=next(value for value in self.io.rows if value and value&31==2 and not value&32)
+        self.io.rows[310]=0x12340020
+        report=self.capture()
+        self.assertEqual(report['ff_boundary_observation']['first_iff_row'],310)
+        self.assertEqual(report['ff_boundary_observation']['trailing_blank_rows'],6)
+        with self.assertRaisesRegex(ValueError,'Insufficient observed trailing FF space'):
+            p.make_plan(self.save('early-iff.json',report),['memory','compute'])
+
+    def test_plan_exposes_observed_boundary_and_remaining_space(self):
+        plan=p.make_plan(self.save('capture.json',self.capture()),['memory','compute'])
+        evidence=plan['ff_boundary_evidence']
+        self.assertEqual(evidence['first_iff_row'],488)
+        self.assertEqual(evidence['first_iff_word'],1<<5)
+        self.assertEqual(evidence['remaining_blank_rows_after_plan'],
+                         evidence['observed_trailing_blank_rows']-len(plan['records']))
+        self.assertFalse(evidence['iff_register_checked'])
+        self.assertFalse(evidence['eight_zero_rule_assumed'])
+        self.assertEqual(evidence['software_reserved_rows'],16)
+
+    def test_missing_or_ambiguous_type_boundary_is_not_guessed(self):
+        self.assertEqual(c.ff_boundary_observation([0]*512)['status'],'not-observed')
+        rows=[0]*512;rows[300]=0xffffffff
+        self.assertEqual(c.ff_boundary_observation(rows)['status'],'ambiguous')
+        for row,value in enumerate(self.io.rows):
+            if value&32:self.io.rows[row]=0
+        plan=p.make_plan(self.save('missing-iff.json',self.capture()),['memory'])
+        self.assertEqual(plan['status'],'incomplete')
+        self.assertEqual(plan['records'],[])
+        self.assertIsNone(plan['iff_boundary'])
+
     def test_cross_card_plan_rejected(self):
         report = self.capture()
         first = self.save('first.json', report)

@@ -234,6 +234,27 @@ An incomplete preview lists `missing_evidence` in its JSON. It cannot be simulat
 as a complete plan. Old manifests must be regenerated after planner/schema changes.
 Source-generation scripts and captured hardware data are not included here.
 
+## FF/IFF boundary: record bit 5
+
+The planner starts FF interpretation at row222 and stops at the **first observed
+raw record with bit5 set** (`word & 0x20 != 0`). That row and all later rows are
+excluded from FF decoding and append allocation; its payload or chain bits do
+not make it an FF replacement. The boundary is observed per capture, not assumed
+to be row488. Eight blank rows do not establish an IFF boundary in this model.
+
+Raw captures report `ff_boundary_observation`. Plans report
+`ff_boundary_evidence`: the marker row/word, last occupied FF row, trailing blank
+capacity, planned remaining capacity, and the 16-row software reserve. An early
+marker, for example at row310, reduces available append space; insufficient
+space rejects planning. Missing boundaries leave plans incomplete, while
+ambiguous all-ones/PRI-like words are never guessed past.
+
+**IFF_RECORD is not captured or cross-checked by this release.** Boundary evidence
+explicitly records `iff_register_checked: false`. The type-bit model and spare-row
+policy are not proof of controller behavior or programming eligibility. Regenerate
+older plans after this metadata/specification update. Manually inspect the bound
+before considering any hardware operation; agents must never burn.
+
 ## Faster glitching with Pico 2
 
 For faster glitching campaigns, see

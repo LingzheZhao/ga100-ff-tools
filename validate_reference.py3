@@ -10,6 +10,8 @@ import json
 from pathlib import Path
 import types
 
+IFF_TYPE_MASK = 1 << 5
+
 
 def require(ok, message):
     if not ok:
@@ -52,7 +54,7 @@ def decode(rows):
     for row in range(222, len(rows)):
         value = rows[row]
         require(value >> 16 != 0xbadf, 'PRI response in FF range')
-        if value & 32:
+        if value & IFF_TYPE_MASK:
             return blocks, last+1, row
         if not value:
             continue
@@ -191,7 +193,7 @@ def audit(tools, plans, dumps, card_names=None):
         for record in plan['records']:
             row, chain, block, data, encoded = (record[k] for k in ('row','chain','block','new_block','word'))
             require(start <= row < boundary and rows[row] == 0 and row not in used, card+': invalid append row')
-            require(encoded == (data << 16) | (block << 6) | chain and not encoded & 32, card+': encoding mismatch')
+            require(encoded == (data << 16) | (block << 6) | chain and not encoded & IFF_TYPE_MASK, card+': encoding mismatch')
             require(record['old_block'] == before[chain,block], card+': original block mismatch')
             require((chain,block) not in got, card+': duplicate block')
             got[chain,block] = data;used.add(row);after_rows[row] = encoded

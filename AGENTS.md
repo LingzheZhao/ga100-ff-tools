@@ -64,10 +64,12 @@ python3 ffplan.py3 plan --baseline "$RUN_DIR/capture.json" \
   --features memory compute pcie-gen3-pair --output "$RUN_DIR/plan.json"
 ```
 
-Inspect `status`, `missing_evidence`, source hashes, `field_edits`,
+Inspect `status`, `missing_evidence`, `ff_boundary_evidence`, source hashes, `field_edits`,
 `register_effects`, `records`, and the IFF boundary. Require targets to retain
 reported defects and unrelated block bits. Rows must be observed trailing blanks
-before the IFF boundary. Never invent an IFF boundary, repeat pass, identity,
+before the first observed record with bit5 set (`word & 0x20`). Never assume
+row488 or treat eight zero rows as proof of the boundary. IFF_RECORD is not
+cross-checked by this release. Never invent an IFF boundary, repeat pass, identity,
 missing register, fuse location, or defect mask.
 
 Exit 2 means incomplete evidence (or CLI usage error); inspect the diagnostic

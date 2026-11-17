@@ -131,6 +131,8 @@ CMD_READ = 0x1
 CMD_WRITE = 0x2
 CMD_SENSE = 0x3
 CMD_MASK = 0x3
+FF_TYPE_BIT = 5
+IFF_TYPE_MASK = 1 << FF_TYPE_BIT
 
 
 class LinuxBar:
@@ -195,6 +197,26 @@ def controller_idle(io):
     return ((control >> 16) & 31) == 4 and control & CMD_MASK == CMD_IDLE
 
 
+def ff_boundary_observation(rows):
+    """Describe the first type-bit boundary without decoding later IFF payloads."""
+    last = 221
+    for row in range(222, len(rows)):
+        value = int(rows[row], 0) if isinstance(rows[row], str) else rows[row]
+        if value == 0xffffffff or value & 0xffff0000 == 0xbadf0000:
+            return {'status': 'ambiguous', 'row': row, 'iff_register_checked': False,
+                    'reason': 'Unreadable/invalidation-like word; no boundary guessed'}
+        if value & IFF_TYPE_MASK:
+            return {'status': 'observed', 'source': 'raw record type bit 5',
+                    'type_bit': FF_TYPE_BIT, 'type_mask': IFF_TYPE_MASK,
+                    'first_iff_row': row, 'first_iff_word': '0x%08x' % value,
+                    'last_occupied_ff_row': last, 'trailing_blank_rows': row-last-1,
+                    'iff_register_checked': False, 'eight_zero_rule_assumed': False}
+        if value:
+            last = row
+    return {'status': 'not-observed', 'iff_register_checked': False,
+            'reason': 'No type-bit-5 boundary in available raw rows'}
+
+
 def read_rows(io, report, per_row_timeout=0.2, total_timeout=20.0):
     """Two bounded non-programming passes; preserve partial rows and restore address."""
     require(0 < per_row_timeout <= 1 and 0 < total_timeout <= 60, 'Invalid timeout policy')
@@ -237,6 +259,8 @@ def read_rows(io, report, per_row_timeout=0.2, total_timeout=20.0):
     require(report.get('raw_address_restored'), 'Failed to restore original fuse address')
     report['raw_match'] = report['raw_rows'][0] == report['raw_rows'][1]
     report['physical_rows_captured'] = True
+    report['ff_boundary_observation'] = (ff_boundary_observation(report['raw_rows'][0])
+                                         if report['raw_match'] else {'status': 'unreliable', 'reason': 'Raw passes differ'})
 
 
 def capture_io(io, report, raw=False):

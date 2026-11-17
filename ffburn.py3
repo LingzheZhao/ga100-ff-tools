@@ -34,6 +34,9 @@ CMD_READ = 0x1
 CMD_WRITE = 0x2
 CMD_SENSE = 0x3
 CMD_MASK = 0x3
+FF_TYPE_BIT = 5
+IFF_TYPE_MASK = 1 << FF_TYPE_BIT
+FF_CHAIN_MASK = IFF_TYPE_MASK - 1
 
 
 def require(ok, message):
@@ -281,7 +284,7 @@ def run(context, io, journal, execute=False):
                 row, value = record['row'], record['word']
                 require(222 <= row <= 487 and row < plan['iff_boundary'] and expected[row] == 0,
                         'Record is not a blank FF append row')
-                require(0 <= value <= 0xffffffff and value & 32 == 0 and value & 31 in (1,2), 'Invalid FF word')
+                require(0 <= value <= 0xffffffff and value & IFF_TYPE_MASK == 0 and value & FF_CHAIN_MASK in (1,2), 'Invalid FF word')
                 journal('program-intent', **record)
                 # Check after the durable intent; a slow log write never authorizes stale state.
                 require(ctl.read_row(row) == 0, 'Target row is no longer blank')
