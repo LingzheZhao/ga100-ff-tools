@@ -32,6 +32,13 @@ Public references are documented in [SOURCES.md](SOURCES.md). This directory
 contains no real-card captures, identifiers, calibration profiles, ROMs or
 generated plans. Tests build their own synthetic fixtures in temporary folders.
 
+## Agent workflow
+
+[AGENTS.md](AGENTS.md) instructs coding agents to capture, generate per-card
+plans, and simulate them, then stop. **Agents must NEVER BURN fuses**, invoke the
+live burner, or automate its confirmations. Generated records require manual
+review; successful checks are not programming authorization.
+
 ## Capture
 
 On the Linux GPU host, identify the intended card with `lspci -Dnn -d 10de:`.
