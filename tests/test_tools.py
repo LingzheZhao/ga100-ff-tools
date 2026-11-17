@@ -66,7 +66,7 @@ class FakeBar:
         self.address = row
 
     def issue_read(self):
-        self.commands.append(('read', 1))
+        self.commands.append(('read', c.CMD_READ))
         if self.fail_at == len([x for x in self.commands if x[0] == 'read']):
             raise OSError('synthetic I/O failure')
 
@@ -97,6 +97,10 @@ class ToolTests(unittest.TestCase):
         path = self.root/name
         path.write_text(json.dumps(data))
         return path
+
+    def test_fuse_command_constants_match_the_protocol(self):
+        self.assertEqual((c.CMD_IDLE, c.CMD_READ, c.CMD_WRITE, c.CMD_SENSE), (0, 1, 2, 3))
+        self.assertEqual(c.CMD_MASK, 3)
 
     def test_options_only_issues_no_commands(self):
         report = self.capture(raw=False)
@@ -191,7 +195,7 @@ class ToolTests(unittest.TestCase):
         bar = object.__new__(c.LinuxBar)
         bar.writable = True
         bar.dev = self.root/'unbound'
-        for offset, value in [(c.FUSECTRL, 2), (c.FUSECTRL, 3), (0x82000c, 1), (0x100, 1), (c.FUSEADDR, 512)]:
+        for offset, value in [(c.FUSECTRL, c.CMD_WRITE), (c.FUSECTRL, c.CMD_SENSE), (0x82000c, 1), (0x100, 1), (c.FUSEADDR, 512)]:
             with self.assertRaisesRegex(ValueError, 'only physical'):
                 bar._write(offset, value)
 

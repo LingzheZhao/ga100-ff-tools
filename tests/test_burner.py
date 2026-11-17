@@ -39,7 +39,7 @@ class FakeIO:
         self.writes.append((offset,value))
         if offset == b.CTRL:
             self.reg[offset] = 0xe0040000
-            if value == 2:
+            if value == b.CMD_WRITE:
                 self.programs.append((self.reg[b.ADDR],self.reg[b.WDATA]))
                 if self.timeout:
                     self.reg[offset] = 0
@@ -70,6 +70,10 @@ class BurnerTests(unittest.TestCase):
         self.events.append((event,data))
     def run_burn(self):
         return b.run(self.context,self.io,self.journal,execute=True)
+    def test_fuse_command_constants_match_the_protocol(self):
+        self.assertEqual((b.CMD_IDLE, b.CMD_READ, b.CMD_WRITE, b.CMD_SENSE), (0, 1, 2, 3))
+        self.assertEqual(b.CMD_MASK, 3)
+
     def test_full_conversion_plan_programs_once_and_verifies(self):
         result = self.run_burn()
         self.assertEqual(len(self.io.programs),len(self.plan['records']))
@@ -86,7 +90,7 @@ class BurnerTests(unittest.TestCase):
         result=b.run(self.context,self.io,self.journal)
         self.assertEqual(result['mode'],'preflight')
         self.assertFalse(self.io.programs)
-        self.assertFalse(any(off==b.WDATA or (off==b.CTRL and value==2) for off,value in self.io.writes))
+        self.assertFalse(any(off==b.WDATA or (off==b.CTRL and value==b.CMD_WRITE) for off,value in self.io.writes))
         self.assertEqual(self.io.reg[b.ADDR],7)
     def test_offline_default_does_not_open_journal_or_hardware(self):
         with patch.object(b,'LinuxBar',side_effect=AssertionError('hardware')), patch.object(b,'Journal',side_effect=AssertionError('journal')), contextlib.redirect_stdout(io.StringIO()):
@@ -142,7 +146,7 @@ class BurnerTests(unittest.TestCase):
             self.run_burn()
         self.assertEqual(len(self.io.programs),1)
         self.assertEqual(self.events[-1][0],'session-failed')
-        self.assertEqual(self.io.writes[-1],(b.CTRL,1))  # No cleanup MMIO after failure.
+        self.assertEqual(self.io.writes[-1],(b.CTRL,b.CMD_READ))  # No cleanup MMIO after failure.
     def test_program_timeout_never_retries_or_issues_cleanup_read(self):
         self.io.timeout=True
         ticks=iter(range(100000))
@@ -152,7 +156,7 @@ class BurnerTests(unittest.TestCase):
                 with self.assertRaisesRegex(TimeoutError,'timed out'):
                     self.run_burn()
         self.assertEqual(len(self.io.programs),1)
-        self.assertEqual(self.io.writes[-1],(b.CTRL,2))
+        self.assertEqual(self.io.writes[-1],(b.CTRL,b.CMD_WRITE))
     def test_pri_raw_data_rejected_but_physical_all_ones_accepted(self):
         self.io.rows[0]=0xffffffff
         self.context['rows'][0]=0xffffffff
@@ -178,7 +182,7 @@ class BurnerTests(unittest.TestCase):
         adapter.mm=bytearray(b.MAP_SIZE)
         adapter.allow_program=True
         adapter.check_device=lambda:None
-        for offset,value in ((b.SW,1),(b.SBFE,0),(b.WDATA_SECURE,0),(b.DEBUG,0),(0xd604,1),(b.CTRL,3),(b.ADDR,512),(b.WDATA,-1),(b.CTRL,True)):
+        for offset,value in ((b.SW,1),(b.SBFE,0),(b.WDATA_SECURE,0),(b.DEBUG,0),(0xd604,1),(b.CTRL,b.CMD_SENSE),(b.ADDR,512),(b.WDATA,-1),(b.CTRL,True)):
             with self.subTest(offset=offset,value=value),self.assertRaises(ValueError):
                 adapter.wr(offset,value)
     def test_preflight_adapter_cannot_write_program_ports(self):
@@ -186,11 +190,11 @@ class BurnerTests(unittest.TestCase):
         adapter.allow_program=False
         adapter.mm=bytearray(b.MAP_SIZE)
         adapter.check_device=lambda:None
-        for offset,value in ((b.WDATA,1),(b.CTRL,2)):
+        for offset,value in ((b.WDATA,1),(b.CTRL,b.CMD_WRITE)):
             with self.assertRaisesRegex(ValueError,'Preflight'):
                 adapter.wr(offset,value)
         adapter.wr(b.ADDR,222)
-        adapter.wr(b.CTRL,1)
+        adapter.wr(b.CTRL,b.CMD_READ)
 
     def test_journal_is_exclusive_and_durable(self):
         with tempfile.TemporaryDirectory() as temp:

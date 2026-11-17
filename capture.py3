@@ -124,6 +124,14 @@ def sample(rd, values, issues):
 FUSECTRL, FUSEADDR, FUSEDATA, FUSEDEBUG = 0x820000, 0x820004, 0x820008, 0x820060
 CRC_STATUS = 0x820070
 
+# Fuse-controller command field. SENSE is named for protocol completeness;
+# these public adapters intentionally reject it.
+CMD_IDLE = 0x0
+CMD_READ = 0x1
+CMD_WRITE = 0x2
+CMD_SENSE = 0x3
+CMD_MASK = 0x3
+
 
 class LinuxBar:
     """Selected-device adapter with only address selection and CMD_READ writes."""
@@ -151,7 +159,7 @@ class LinuxBar:
         require(not (self.dev/'driver').exists() and not (self.dev/'driver').is_symlink(),
                 'A driver bound to the card during capture; stop')
         require(type(value) is int and ((offset == FUSEADDR and 0 <= value < 512)
-                                       or (offset == FUSECTRL and value == 1)),
+                                       or (offset == FUSECTRL and value == CMD_READ)),
                 'Adapter permits only physical row selection and CMD_READ')
         struct.pack_into('<I', self.mm, offset, value)
 
@@ -159,7 +167,7 @@ class LinuxBar:
         self._write(FUSEADDR, row)
 
     def issue_read(self):
-        self._write(FUSECTRL, 1)
+        self._write(FUSECTRL, CMD_READ)
 
     def restore_address(self, value):
         self._write(FUSEADDR, value)
@@ -184,7 +192,7 @@ def checked_read(io, offset, allow_all_ones=False):
 
 def controller_idle(io):
     control = checked_read(io, FUSECTRL)
-    return ((control >> 16) & 31) == 4 and control & 3 == 0
+    return ((control >> 16) & 31) == 4 and control & CMD_MASK == CMD_IDLE
 
 
 def read_rows(io, report, per_row_timeout=0.2, total_timeout=20.0):

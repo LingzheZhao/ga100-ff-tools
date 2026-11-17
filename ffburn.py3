@@ -25,6 +25,14 @@ SW, WDATA_SECURE, SBFE = 0x820040, 0x82048c, 0x821108
 WDATA_PLM, CTRL_PLM = 0x8200f4, 0x8200f8
 MAP_SIZE = 0x822000
 
+# Fuse-controller command field. SENSE is named for protocol completeness;
+# these public adapters intentionally reject it.
+CMD_IDLE = 0x0
+CMD_READ = 0x1
+CMD_WRITE = 0x2
+CMD_SENSE = 0x3
+CMD_MASK = 0x3
+
 
 def require(ok, message):
     if not ok:
@@ -137,9 +145,9 @@ class LinuxBar:
     def wr(self, offset, value):
         require(type(value) is int and 0 <= value <= 0xffffffff, 'Invalid MMIO value')
         require((offset == ADDR and 0 <= value < 512) or
-                (offset == CTRL and value in (0,1,2)) or offset == WDATA,
+                (offset == CTRL and value in (CMD_IDLE, CMD_READ, CMD_WRITE)) or offset == WDATA,
                 'Only main-array address, IDLE/READ/WRITE commands and WDATA are permitted')
-        require(self.allow_program or not (offset == WDATA or (offset == CTRL and value == 2)),
+        require(self.allow_program or not (offset == WDATA or (offset == CTRL and value == CMD_WRITE)),
                 'Preflight adapter forbids program-data and CMD_WRITE writes')
         self.check_device()
         struct.pack_into('<I', self.mm, offset, value)
@@ -198,10 +206,10 @@ class Controller:
     def read_row(self, row):
         require(type(row) is int and 0 <= row < 512, 'Invalid physical row')
         self.ready()
-        self.io.wr(CTRL, 0)
+        self.io.wr(CTRL, CMD_IDLE)
         self.io.wr(ADDR, row)
         require(self.rd(ADDR) == row, 'Row address did not latch')
-        self.io.wr(CTRL, 1)
+        self.io.wr(CTRL, CMD_READ)
         self.wait(1)
         self.ready()
         require(self.rd(ADDR) == row, 'Row address changed during read')
@@ -275,7 +283,7 @@ def run(context, io, journal, execute=False):
                 require(ctl.read_row(row) == 0, 'Target row is no longer blank')
                 ctl.ready()
                 require(ctl.rd(ADDR) == row, 'Target address changed before programming')
-                io.wr(CTRL, 0)
+                io.wr(CTRL, CMD_IDLE)
                 io.wr(ADDR, row)
                 require(ctl.rd(ADDR) == row, 'Program address did not latch')
                 io.wr(WDATA, value)
@@ -283,7 +291,7 @@ def run(context, io, journal, execute=False):
                 ctl.ready()
                 require(ctl.rd(ADDR) == row, 'Target address changed after staging data')
                 issued.append(row)  # Track the command attempt even if the MMIO write raises.
-                io.wr(CTRL, 2)
+                io.wr(CTRL, CMD_WRITE)
                 ctl.wait(5)
                 actual = ctl.read_row(row)
                 journal('program-readback', row=row, expected=value, actual=actual)
