@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """GA100 public-plan burner. Offline review by default; explicit live opt-in.
 
+Use at your own risk. Manually double-check every burn plan before execution.
+
 Consumes adjacent ffplan.py3's saved plans and their original evidence. No
 voltage, reset, GPIO, override, SENSE, ROM or PHY setup is performed. The operator
 must establish and maintain the externally qualified programming conditions.
@@ -233,6 +235,8 @@ def confirm_programming(context):
     require(sys.stdin.isatty(), 'Programming requires an interactive terminal for three confirmations')
     plan = context['plan']
     count = len(plan['records'])
+    print('USE AT YOUR OWN RISK: irreversible OTP programming can permanently damage hardware.')
+    print('Manually double-check the card, baseline, defect masks, rows and encoded words before proceeding.')
     print('IRREVERSIBLE FF PROGRAMMING')
     print('Card: %s' % plan['bdf'])
     print('Plan: %s' % plan['plan_id'])

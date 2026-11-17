@@ -1,5 +1,15 @@
 # ga100-ff-tools
 
+> **USE AT YOUR OWN RISK.** These experimental tools are provided **AS IS**, without
+> warranty. Fuse programming is physically irreversible and can permanently damage
+> your GPU, VRM, board, or other hardware, or cause data loss. To the extent
+> permitted by applicable law, the authors and contributors accept no liability
+> for damage or loss arising from use of these tools.
+>
+> **Manually double-check every burn plan before running it.** Verify the intended
+> card and baseline, defect masks, chain/block edits, blank append rows, and encoded
+> 32-bit words. Automated validation and confirmations do not replace manual review.
+
 Public-source GA100/CMP 170HX fuse capture, per-card FF planning, replay
 simulation, and guarded programming tools.
 
@@ -216,6 +226,19 @@ Planner exit codes:
 An incomplete preview lists `missing_evidence` in its JSON. It cannot be simulated
 as a complete plan. Old manifests must be regenerated after planner/schema changes.
 Source-generation scripts and captured hardware data are not included here.
+
+## Faster glitching with Pico 2
+
+For faster glitching campaigns, see
+[dalzyu/pico-ga100vfi](https://github.com/dalzyu/pico-ga100vfi). It provides an
+RP2350/Pico 2 toolchain using PMBus voltage control and PEX_RST timing. Upstream
+reports approximately **5.5 attempts per second without trace dumps** on its
+single tested card; attempt rates and successful settings depend on the board
+and setup. Follow that project's build, wiring, and hardware precautions.
+
+That project handles the glitching step. This repository does not drive the Pico
+or automate glitching; the burner independently checks the live programming
+prerequisites and baseline. Manually review the per-card plan before execution.
 
 ## Public-plan burner
 

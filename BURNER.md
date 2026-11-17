@@ -1,5 +1,15 @@
 # Public-plan FF burner
 
+> **USE AT YOUR OWN RISK.** These experimental tools are provided **AS IS**, without
+> warranty. Fuse programming is physically irreversible and can permanently damage
+> your GPU, VRM, board, or other hardware, or cause data loss. To the extent
+> permitted by applicable law, the authors and contributors accept no liability
+> for damage or loss arising from use of these tools.
+>
+> **Manually double-check every burn plan before running it.** Verify the intended
+> card and baseline, defect masks, chain/block edits, blank append rows, and encoded
+> 32-bit words. Automated validation and confirmations do not replace manual review.
+
 `ffburn.py3` consumes `ga100-public-ff-plan-v2` files from the adjacent
 `ffplan.py3`. Python 3.8+ and the standard library are sufficient. The planner
 must remain beside the burner; the burner does not use the legacy local engine,
@@ -42,6 +52,12 @@ The programming window and any required external supply must already be
 established and maintained by the operator's qualified setup. This package does
 not control a Pico, reset, voltage, GPIO, rail timing, ROM, SW override or PLMs.
 It checks the resulting registers rather than attempting to open them.
+
+For faster glitching campaigns, consider
+[dalzyu/pico-ga100vfi](https://github.com/dalzyu/pico-ga100vfi), a separate Pico 2
+voltage-glitching toolchain. Its reported rates and settings are specific to the
+upstream test setup; follow its own hardware documentation. This burner does not
+invoke it or assume that a successful glitch validates a burn plan.
 
 | Observation | Required value |
 |---|---|

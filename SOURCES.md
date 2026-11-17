@@ -58,3 +58,10 @@ claimed; [BURNER.md](BURNER.md) documents its interfaces and limits.
 Credit to **xPatrik (Discord)** for research contributions and supplied reference
 material. Source labels describe provenance; they do not establish validation
 of empirical mappings on other cards.
+
+
+[dalzyu/pico-ga100vfi](https://github.com/dalzyu/pico-ga100vfi) is linked as a
+separate RP2350/Pico 2 glitching toolchain. Its README reports campaign throughput
+on one tested card; that is an upstream observation, not a benchmark or guarantee
+for these tools. No upstream firmware, wiring implementation, or glitch control
+is bundled or invoked here.
