@@ -1,0 +1,12 @@
+# Local hardware evidence and generated plans are not release source.
+*.json
+captures/
+plans/
+*.rom
+*.bin
+*.log
+__pycache__/
+*.py[cod]
+.DS_Store
+*.jsonl
+journals/
