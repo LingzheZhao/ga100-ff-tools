@@ -15,6 +15,59 @@ class PlanningPolicyTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.temp.cleanup)
 
+    def test_catalog_exposes_supported_and_unsupported_changes(self):
+        catalog = {item['id']: item for item in p.change_catalog()}
+        self.assertEqual(set(catalog), set(p.GROUPS) | set(p.UNSUPPORTED_CHANGES))
+        self.assertEqual(catalog['pcie-gen4-completion']['allowed_routes'], ['empirical'])
+        for name in ('ecc', 'nvdec', 'sm-speed'):
+            self.assertFalse(catalog[name]['selectable'])
+            with self.assertRaisesRegex(ValueError, 'Invalid feature'):
+                self.plan([name])
+
+    def test_change_list_merges_shared_rows_and_simulates_targets(self):
+        plan = self.plan(['nvlink', 'sys-pipe'])
+        self.assertEqual(len(plan['records']), 1)
+        self.assertEqual(len(plan['proposed_changes']), 2)
+        for change in plan['proposed_changes']:
+            self.assertEqual(change['record_rows'], [plan['records'][0]['row']])
+            self.assertEqual(change['record_count_including_shared'], 1)
+            self.assertFalse(change['working_capability_verified'])
+        sim = p.simulate(self.fixture.path, plan)
+        for change in sim['proposed_changes']:
+            self.assertEqual(change['status'], 'logical-target-replayed')
+            self.assertTrue(all(field['target_replayed'] for field in change['fields']))
+            self.assertFalse(change['working_capability_verified'])
+
+    def test_incomplete_change_list_never_reports_executable_rows(self):
+        for snapshot in self.fixture.capture['options']:
+            del snapshot['NV_FUSE_IFF_RECORD']
+        plan = self.plan(['memory', 'compute'])
+        for change in plan['proposed_changes']:
+            self.assertEqual(change['status'], 'incomplete')
+            self.assertEqual(change['record_rows'], [])
+
+    def test_changes_cli_and_feature_alias(self):
+        from contextlib import redirect_stdout
+        import io
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(p.main(['changes']), 0)
+        self.assertEqual(json.loads(output.getvalue())['changes'], p.change_catalog())
+        self.fixture.path.write_text(json.dumps(self.fixture.capture))
+        plans = []
+        for option in ('--changes', '--features'):
+            output = io.StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(p.main(['plan', '--baseline', str(self.fixture.path), option, 'memory']), 0)
+            plans.append(json.loads(output.getvalue()))
+        self.assertEqual(plans[0], plans[1])
+
+    def test_tampered_change_list_rejected_by_simulator(self):
+        plan = self.plan(['memory'])
+        plan['proposed_changes'][0]['fields'][0]['target'] ^= 1
+        with self.assertRaisesRegex(ValueError, 'regeneration'):
+            p.simulate(self.fixture.path, plan)
+
     def change_option(self, name, value):
         for sample in self.fixture.capture['options']:
             sample[name] = value

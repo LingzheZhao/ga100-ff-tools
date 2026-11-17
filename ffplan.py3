@@ -111,6 +111,77 @@ CONVERSION_FINDINGS = {
 }
 
 
+# Capability descriptions are planning scope, never promises of working hardware.
+CHANGE_INFO = {
+    'memory': ('HBM capacity', 'Captured FBIO/FBPA/FBP/ROP_L2 defect masks; capacity is die-dependent.'),
+    'compute': ('Compute units', 'Captured GPC/TPC/PES defect masks; PES and ROP_L2 must reach defect targets. Include memory if needed.'),
+    'pcie-gen3-pair': ('PCIe Gen3 candidate gates', 'Experimental combined bits 1+9; individual bit identity unresolved; link training still required.'),
+    'pcie-known': ('PCIe Gen4 and boot option gates', 'Known MAGIC_D[25] and boot gates; firmware, PHY and link training determine actual speed.'),
+    'pcie-gen4-bit25': ('PCIe Gen4 bit25 gate only', 'Clears MAGIC_D[25] only; does not establish working Gen4.'),
+    'nvlink': ('NVLink disable mask', 'Defect-preserving mask change; U11 hardware modification and ROM-check bypass still required; bring-up untested.'),
+    'sys-pipe': ('SYS_PIPE / MIG experiment', 'Opt-in; MIG enumeration reported, functionality unvalidated. Does not establish ECC or NVDEC.'),
+    'a100-device-id': ('A100 PCI device identity', 'Explicit A100 conversion route and matching signed VBIOS required; identity alone is not a functional conversion.'),
+    'pcie-gen4-completion': ('Extra MAGIC_D experiment', 'Empirical route only; one-die group mapping, not a universal Gen4 requirement; independent per-card validation required.'),
+}
+UNSUPPORTED_CHANGES = {
+    'ecc': 'No established FF mapping in these tools; ECC operation is not modeled.',
+    'nvdec': 'Separate disable fuse; no established FF coordinates.',
+    'sm-speed': 'No established FF mapping for the speed throttle; runtime overrides are outside this planner.',
+}
+
+
+def change_catalog():
+    result = []
+    for name in GROUPS:
+        label, note = CHANGE_INFO[name]
+        result.append({'id': name, 'label': label, 'selectable': True,
+                       'mapping_status': 'experimental' if name in EXPERIMENTAL_FEATURES else 'published mapping',
+                       'allowed_routes': ['empirical'] if name == 'pcie-gen4-completion' else
+                                         ['a100', 'empirical'] if name == 'a100-device-id' else list(ROUTES),
+                       'fields': list(GROUPS[name]), 'requirements_and_limits': note})
+    result.extend({'id': name, 'label': name, 'selectable': False,
+                   'mapping_status': 'unsupported', 'requirements_and_limits': note}
+                  for name, note in UNSUPPORTED_CHANGES.items())
+    return result
+
+
+def proposed_changes(groups, edits, records, complete, replayed=None):
+    catalog = {item['id']: item for item in change_catalog()}
+    result = []
+    for group in groups:
+        names = set(GROUPS[group])
+        if group == 'pcie-gen3-pair':
+            names.add(GEN3_PAIR['field'])
+        if group == 'pcie-gen4-completion':
+            names.update(spec['field'] for spec in MAGIC_COMPLETION)
+        fields, keys = [], set()
+        for edit in edits:
+            if edit['field'] not in names:
+                continue
+            field = edit['field']
+            if 'ff_mask' in edit:
+                keys.add((edit['ff_chain'], edit['ff_block']))
+                actual = replayed.get((edit['ff_chain'], edit['ff_block'])) if replayed is not None else None
+            else:
+                chain, start, width, _ = FIELDS[field]
+                keys.update((chain, bit//16) for bit in range(start, start+width))
+                actual = get_field(replayed, field) if replayed is not None else None
+            fields.append({'field': field, 'before': edit['old'], 'target': edit['target'],
+                           'target_source': edit.get('target_source'),
+                           **({'replayed': actual, 'target_replayed': actual == edit['target']}
+                              if replayed is not None else {})})
+        related = [r for r in records if (r['chain'], r['block']) in keys]
+        changes = any(item['before'] != item['target'] for item in fields)
+        result.append({**catalog[group], 'status': 'incomplete' if not complete else
+                       'logical-target-replayed' if replayed is not None else
+                       'proposed-change' if changes else 'already-at-target',
+                       'fields': fields, 'record_rows': [r['row'] for r in related],
+                       'record_count_including_shared': len(related),
+                       'row_accounting': 'Rows can be shared between capabilities; use the plan space_budget for unique totals.',
+                       'working_capability_verified': False})
+    return result
+
+
 def require(condition, message):
     if not condition:
         raise ValueError(message)
@@ -287,7 +358,7 @@ def public_spec():
                               'start_bits': [0, 8], 'last_bits': [16, 24],
                               'provenance': 'User-supplied GA100 FF burn map, 2026-11-17',
                               'meaning': 'current writable IFF execution range; not immutable geometry'},
-        'routes': list(ROUTES),
+        'routes': list(ROUTES), 'change_catalog': change_catalog(),
         'record_format': {'type_bit': FF_TYPE_BIT, 'iff_type_mask': IFF_TYPE_MASK,
                           'ff_chain_mask': FF_CHAIN_MASK,
                           'boundary': 'first observed type-bit-5 record; zeros do not establish IFF start'},
@@ -669,6 +740,7 @@ def make_plan(baseline, groups, repeat=None, defects=None, route='cmp', proof_ro
            if EXPERIMENTAL_FEATURES.intersection(groups) else {}),
         'sources': public_spec()['sources'], 'bdf': evidence['bdf'], 'features': groups,
         'route': route, 'space_budget': space_budget, 'dependency_checks': dependencies,
+        'proposed_changes': proposed_changes(groups, edits, records, not missing),
         'cold_boot_checkpoints': checkpoint_preview(old, records, opts),
         'proof_preview': proof_preview(old, records, proof_rows) if not missing else
                          {'rows_reserved': proof_rows, 'records_generated': False, 'candidates': [],
@@ -753,6 +825,7 @@ def simulate(baseline, plan, repeat=None, defects=None):
             'records_applied': len(plan['records']),
             'changed_rows': [i for i in sorted(before) if before[i] != after[i]],
             'route': plan['route'], 'space_budget': plan['space_budget'],
+            'proposed_changes': proposed_changes(plan['features'], plan['field_edits'], plan['records'], True, blocks),
             'cold_boot_checkpoints': checkpoint_preview(decode(before)[0], plan['records'], evidence['opts']),
             'cold_boot_verified': False, 'working_features_verified': False,
             'public_fields': {edit['field']: get_field(blocks, edit['field']) for edit in plan['field_edits']
@@ -767,9 +840,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('public', help='Show only the public field specification and its sources')
+    sub.add_parser('changes', help='List selectable capability changes and unsupported capabilities; no capture required')
     p = sub.add_parser('plan', help='Plan from a full baseline, or report missing public-capture evidence')
     p.add_argument('--baseline', required=True)
-    p.add_argument('--features', nargs='+', choices=GROUPS, default=['memory', 'compute', 'pcie-gen3-pair'],
+    p.add_argument('--changes', '--features', dest='features', nargs='+', choices=GROUPS, default=['memory', 'compute', 'pcie-gen3-pair'],
                    help='Default: memory compute pcie-gen3-pair; explicit selections replace the defaults')
     p.add_argument('--route', choices=ROUTES, default='cmp', help='Intended path; extra MAGIC_D clearing requires empirical')
     p.add_argument('--proof-rows', type=int, default=0, help='Reserve space for separately reviewed proof records; generates no proof writes')
@@ -784,6 +858,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     if args.command == 'public':
         result = public_spec()
+    elif args.command == 'changes':
+        result = {'changes': change_catalog(), 'hardware_verified': False,
+                  'note': 'Proposed capability changes only; no guaranteed unlocks or hardware execution.'}
     elif args.command == 'plan':
         result = make_plan(args.baseline, args.features, args.repeat, args.defects, args.route, args.proof_rows)
     else:

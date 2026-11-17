@@ -70,6 +70,11 @@ python3 ffplan.py3 plan --baseline "$RUN_DIR/capture.json" \
   --features memory compute pcie-gen3-pair --output "$RUN_DIR/plan.json"
 ```
 
+Use `python3 ffplan.py3 changes` to review available capabilities and their limits.
+Select them using `--changes` (`--features` is an alias). Unsupported entries
+must never generate records. Review `proposed_changes` in both plan and replay
+outputs, including shared row references and per-field targets.
+
 Inspect `status`, `missing_evidence`, `ff_boundary_evidence`, source hashes, `field_edits`,
 `register_effects`, `records`, `dependency_checks`, `space_budget`,
 `cold_boot_checkpoints`, and the IFF boundary. Account for one restoration row

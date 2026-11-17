@@ -379,3 +379,37 @@ plan IDs bind each plan to its current evidence and specification.
 - **xPatrik (Discord)** — research contributions and reference material.
 - **Kate Land** — published GA100 voltage-glitching research, FF mappings and
   public register references; see [SOURCES.md](SOURCES.md).
+
+## Capability change list
+
+List selectable changes and unsupported capabilities without a capture:
+
+```sh
+python3 ffplan.py3 changes
+```
+
+Select the desired changes when planning (`--features` remains an alias):
+
+```sh
+python3 ffplan.py3 plan --baseline card-a.json \
+  --changes memory compute pcie-gen3-pair pcie-known --output card-a-plan.json
+python3 ffplan.py3 simulate --baseline card-a.json --plan card-a-plan.json
+```
+
+The catalog includes HBM capacity, compute units, PCIe gates, NVLink, optional
+SYS_PIPE/MIG, A100 identity and the separate empirical MAGIC_D experiment.
+It lists ECC, NVDEC and SM-speed burning as unsupported and prevents selecting
+them. Existing route requirements and per-card defect/dependency checks remain
+mandatory. Explicit selections replace the default memory/compute/Gen3 set;
+no extra capability is silently added.
+
+Both outputs contain `proposed_changes`: a list of selected capabilities with
+mapping status, requirements/limits, before/target field values, affected row
+references and a count including shared records. Shared blocks are merged into
+one final record; per-capability row counts must not be added together. The
+plan's `space_budget` gives unique totals and proof/restoration reservations.
+Simulation adds replayed values and target-match results. Incomplete plans list
+changes as incomplete with no executable rows. A successful replay establishes
+only the logical masks, never working capacity, compute, PCIe speed or other
+hardware functionality. Regenerate existing plans after updating the tool;
+manual edits to this list are rejected by simulation and plan validation.
