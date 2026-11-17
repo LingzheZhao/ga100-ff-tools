@@ -49,6 +49,23 @@ lock. Other tools and drivers must stay away from the target during capture.
 
 For a complete planner input:
 
+Each dump records `gpu_uuid` and `gpu_uuid_observation` (source and whether a
+live per-BDF driver lookup verified it). The UUID is read from
+`/proc/driver/nvidia/gpus/<BDF>/information` when available. Before unbinding,
+save the BDF/UUID association using `nvidia-smi --query-gpu=pci.bus_id,uuid --format=csv,noheader`.
+After unbinding, provide that saved association explicitly:
+
+```sh
+sudo python3 capture.py3 --bdf 0000:01:00.0 --raw \
+  --gpu-uuid 0000:01:00.0=GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx --output card-a.json
+```
+
+Replace the placeholder with the card's full UUID. Repeat `--gpu-uuid BDF=GPU-…`
+for multiple cards. Supplied UUIDs are labeled as user-provided when the driver
+lookup is unavailable; a conflicting live UUID aborts capture before BAR access.
+Missing UUIDs are explicitly recorded as unavailable, never guessed. The planner
+already carries this UUID into its specimen metadata.
+
 ```sh
 sudo python3 capture.py3 --bdf 0000:01:00.0 --raw --output card-a.json
 ```

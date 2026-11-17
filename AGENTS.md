@@ -23,6 +23,9 @@ never authorizes an agent to program hardware.**
 Read `README.md`, `SOURCES.md`, and the use-at-your-own-risk warning. Require the
 user's intended card BDF(s); do not choose a target by GPU index or slot guessing.
 Process each card separately and preserve its association with all outputs.
+Record its GPU UUID too. If driver information is unavailable after unbinding,
+use a previously saved BDF/UUID mapping via `--gpu-uuid BDF=GPU-UUID`. Never
+invent a UUID or label a supplied mapping as live-verified.
 
 Use a normal CMP `20c2` baseline with clean CRC for planning. Before live capture,
 the selected Linux card must already be unbound, PCI memory decoding enabled,

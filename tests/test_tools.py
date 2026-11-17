@@ -81,6 +81,48 @@ class FakeBar:
         pass
 
 
+class UUIDTests(unittest.TestCase):
+    UUID = 'GPU-12345678-1234-5678-9abc-123456789abc'
+    BDF = '0000:01:00.0'
+
+    def test_observed_uuid_matches_selected_bdf(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/self.BDF).mkdir()
+            (root/self.BDF/'information').write_text('GPU UUID: '+self.UUID+'\n')
+            result = c.observe_gpu_uuid(self.BDF, self.UUID, root)
+            self.assertEqual(result['value'], self.UUID)
+            self.assertTrue(result['live_verified'])
+            self.assertTrue(result['supplied_mapping_matched'])
+            with self.assertRaisesRegex(ValueError, 'disagrees'):
+                c.observe_gpu_uuid(self.BDF, self.UUID[:-1]+'d', root)
+
+    def test_unbound_uuid_preserves_supplied_provenance(self):
+        with tempfile.TemporaryDirectory() as temp:
+            result = c.observe_gpu_uuid(self.BDF, self.UUID, Path(temp))
+            self.assertEqual(result['value'], self.UUID)
+            self.assertFalse(result['live_verified'])
+            self.assertEqual(result['source'], 'user-supplied BDF mapping')
+            self.assertIsNone(c.observe_gpu_uuid(self.BDF, proc_gpus=Path(temp))['value'])
+
+    def test_reject_invalid_or_sentinel_uuid(self):
+        for value in ('GPU-short', 'GPU-'+'00000000-0000-0000-0000-000000000000',
+                      'GPU-ffffffff-ffff-ffff-ffff-ffffffffffff'):
+            with self.assertRaises(ValueError):
+                c.validate_gpu_uuid(value)
+
+    def test_identity_mismatch_stops_before_bar_access(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root/self.BDF).mkdir()
+            (root/self.BDF/'information').write_text('GPU UUID: '+self.UUID+'\n')
+            with patch.object(c, 'LinuxBar') as bar:
+                result = c.capture_device(self.BDF, gpu_uuid=self.UUID[:-1]+'d', proc_gpus=root)
+                self.assertFalse(result['ok'])
+                self.assertIn('disagrees', result['error'])
+                bar.assert_not_called()
+
+
 class ToolTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

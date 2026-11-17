@@ -295,11 +295,41 @@ def capture_io(io, report, raw=False):
         report['ok'] = report['ok'] and report['raw_match'] and report['raw_address_restored']
 
 
+def validate_gpu_uuid(value):
+    require(isinstance(value, str) and re.fullmatch(
+        r'GPU-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}', value),
+        'Expected a full GPU UUID (GPU-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx)')
+    digits = value[4:].replace('-', '').lower()
+    require(set(digits) not in ({'0'}, {'f'}), 'Sentinel GPU UUID is not card identity')
+    return 'GPU-' + value[4:].lower()
+
+
+def observe_gpu_uuid(bdf, supplied=None, proc_gpus=Path('/proc/driver/nvidia/gpus')):
+    supplied = validate_gpu_uuid(supplied) if supplied is not None else None
+    path = proc_gpus/bdf/'information'
+    try:
+        content = path.read_text()
+    except OSError as exc:
+        return {'value': supplied, 'source': 'user-supplied BDF mapping' if supplied else 'unavailable',
+                'live_verified': False, 'lookup_path': str(path),
+                'lookup_error': str(exc),
+                'note': 'Driver information may be unavailable after unbinding; save the UUID before unbinding.'}
+    matches = re.findall(r'^GPU UUID:\s*(\S+)\s*$', content, re.MULTILINE)
+    require(len(matches) == 1, 'Missing or ambiguous GPU UUID in NVIDIA information file')
+    observed = validate_gpu_uuid(matches[0])
+    require(supplied is None or supplied == observed, 'Supplied GPU UUID disagrees with selected BDF information')
+    return {'value': observed, 'source': 'NVIDIA per-BDF information file',
+            'live_verified': True, 'lookup_path': str(path),
+            'supplied_mapping_matched': supplied is not None}
+
+
 def new_report(bdf, raw=False):
     return {
         'schema': 'ga100-public-capture-v1',
         'utc': datetime.datetime.now(datetime.timezone.utc).isoformat(),
-        'bdf': bdf, 'non_programming': True, 'mmio_read_only': not raw,
+        'bdf': bdf, 'gpu_uuid': None,
+        'gpu_uuid_observation': {'value': None, 'source': 'unavailable', 'live_verified': False},
+        'non_programming': True, 'mmio_read_only': not raw,
         'raw_requested': raw, 'physical_rows_captured': False,
         'public_map_sha256': MAP_SHA256, 'registers': register_manifest(),
         'raw_protocol_source': RAW_SOURCE,
@@ -309,10 +339,13 @@ def new_report(bdf, raw=False):
 
 
 def capture_device(bdf, raw=False, sysfs=Path('/sys/bus/pci/devices'),
-                   boot_file=Path('/proc/sys/kernel/random/boot_id'), bar_factory=None):
+                   boot_file=Path('/proc/sys/kernel/random/boot_id'), bar_factory=None,
+                   gpu_uuid=None, proc_gpus=Path('/proc/driver/nvidia/gpus')):
     bdf = validate_bdf(bdf)
     report = new_report(bdf, raw)
     try:
+        identity = observe_gpu_uuid(bdf, gpu_uuid, proc_gpus)
+        report.update(gpu_uuid=identity['value'], gpu_uuid_observation=identity)
         dev = sysfs/bdf
         require(not (dev/'driver').is_symlink() and not (dev/'driver').exists(),
                 'Device has a bound driver; unbind only the selected card first')
@@ -343,6 +376,8 @@ def capture_device(bdf, raw=False, sysfs=Path('/sys/bus/pci/devices'),
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bdf', nargs='+', help='One or more explicit card BDFs')
+    parser.add_argument('--gpu-uuid', action='append', default=[], metavar='BDF=GPU-UUID',
+                        help='Repeat per card: UUID saved before driver unbinding; checked against driver information when available')
     output = parser.add_mutually_exclusive_group()
     output.add_argument('--output', help='Exact JSON filename for one card')
     output.add_argument('--output-dir', default=None, help='One timestamped JSON per card (default: current directory)')
@@ -358,6 +393,15 @@ def main(argv=None):
         parser.error('--bdf is required')
     try:
         bdfs = [validate_bdf(bdf) for bdf in args.bdf]
+        uuid_map = {}
+        for entry in args.gpu_uuid:
+            require('=' in entry, '--gpu-uuid requires BDF=GPU-UUID')
+            card, value = entry.split('=', 1)
+            card = validate_bdf(card)
+            require(card in bdfs, 'UUID mapping BDF is not among selected cards')
+            require(card not in uuid_map, 'Duplicate UUID mapping for BDF')
+            uuid_map[card] = validate_gpu_uuid(value)
+        require(len(set(uuid_map.values())) == len(uuid_map), 'Same UUID supplied for multiple cards')
     except ValueError as exc:
         parser.error(str(exc))
     if len(set(bdfs)) != len(bdfs):
@@ -376,11 +420,12 @@ def main(argv=None):
     with ExitStack() as stack:
         outputs = [stack.enter_context(path.open('x')) for path in paths]
         for bdf, path, out in zip(bdfs, paths, outputs):
-            report = capture_device(bdf, raw=args.raw)
+            report = capture_device(bdf, raw=args.raw, gpu_uuid=uuid_map.get(bdf))
             json.dump(report, out, indent=2)
             out.write('\n')
             out.flush()
-            print('%s: %s -> %s' % (bdf, 'OK' if report['ok'] else 'INCOMPLETE/UNRELIABLE', path))
+            print('%s [%s]: %s -> %s' % (bdf, report['gpu_uuid'] or 'UUID unavailable',
+                                             'OK' if report['ok'] else 'INCOMPLETE/UNRELIABLE', path))
             if report.get('interrupted'):
                 return 130
             if not report['ok']:
