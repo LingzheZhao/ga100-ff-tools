@@ -12,6 +12,7 @@ import test_conversion as fixtures
 from test_tools import load
 
 b = load('public_burner', Path(__file__).resolve().parents[1]/'ffburn.py3')
+real_confirm_programming = b.confirm_programming
 
 
 class FakeIO:
@@ -62,6 +63,9 @@ class BurnerTests(unittest.TestCase):
         self.context = b.prepare(self.baseline,self.plan_path)
         self.io = FakeIO(self.context['rows'])
         self.events = []
+        confirmer = patch.object(b, 'confirm_programming')
+        self.confirm = confirmer.start()
+        self.addCleanup(confirmer.stop)
     def journal(self,event,**data):
         self.events.append((event,data))
     def run_burn(self):
@@ -230,6 +234,59 @@ class BurnerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'full-array'):
             b.run(self.context,self.io,journal,execute=True)
         self.assertEqual(len(self.io.programs),len(self.plan['records']))
+
+    def test_three_exact_confirmations(self):
+        answers=[self.plan['bdf'],self.plan['plan_id'],'BURN %d ROWS' % len(self.plan['records'])]
+        with patch.object(b.sys.stdin,'isatty',return_value=True), patch('builtins.input',side_effect=answers) as prompt, contextlib.redirect_stdout(io.StringIO()):
+            real_confirm_programming(self.context)
+        self.assertEqual(prompt.call_count,3)
+
+    def test_each_wrong_confirmation_stops_immediately(self):
+        valid=[self.plan['bdf'],self.plan['plan_id'],'BURN %d ROWS' % len(self.plan['records'])]
+        for stage in range(3):
+            answers=valid[:stage]+['wrong']
+            with self.subTest(stage=stage), patch.object(b.sys.stdin,'isatty',return_value=True), patch('builtins.input',side_effect=answers) as prompt, contextlib.redirect_stdout(io.StringIO()):
+                with self.assertRaisesRegex(ValueError,'did not match'):
+                    real_confirm_programming(self.context)
+            self.assertEqual(prompt.call_count,stage+1)
+
+    def test_confirmation_eof_and_noninteractive_input_rejected(self):
+        with patch.object(b.sys.stdin,'isatty',return_value=False), patch('builtins.input') as prompt:
+            with self.assertRaisesRegex(ValueError,'interactive terminal'):
+                real_confirm_programming(self.context)
+            prompt.assert_not_called()
+        with patch.object(b.sys.stdin,'isatty',return_value=True), patch('builtins.input',side_effect=EOFError), contextlib.redirect_stdout(io.StringIO()):
+            with self.assertRaisesRegex(ValueError,'input ended'):
+                real_confirm_programming(self.context)
+
+    def test_interrupted_confirmation_never_programs(self):
+        self.confirm.side_effect=KeyboardInterrupt()
+        with self.assertRaises(KeyboardInterrupt):
+            self.run_burn()
+        self.assertEqual(self.io.writes,[])
+        self.assertFalse(self.io.programs)
+
+    def test_declined_confirmation_issues_no_mmio(self):
+        self.confirm.side_effect=ValueError('Confirmation did not match')
+        with self.assertRaisesRegex(ValueError,'Confirmation'):
+            self.run_burn()
+        self.assertEqual(self.io.writes,[])
+        self.assertFalse(self.io.programs)
+
+    def test_guards_and_baseline_are_checked_after_confirmation(self):
+        self.confirm.side_effect=lambda ctx:self.io.reg.__setitem__(b.DSOV,1)
+        with self.assertRaisesRegex(ValueError,'DSOV'):
+            self.run_burn()
+        self.assertEqual(self.io.writes,[])
+        self.confirm.side_effect=lambda ctx:self.io.rows.__setitem__(100,self.io.rows[100]^1)
+        self.io.reg[b.DSOV]=0
+        with self.assertRaisesRegex(ValueError,'baseline'):
+            self.run_burn()
+        self.assertFalse(self.io.programs)
+
+    def test_preflight_never_asks_for_confirmation(self):
+        b.run(self.context,self.io,self.journal,execute=False)
+        self.confirm.assert_not_called()
 
     def test_existing_live_journal_blocks_device_open(self):
         with tempfile.TemporaryDirectory() as temp:

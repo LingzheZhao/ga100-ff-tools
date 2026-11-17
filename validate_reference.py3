@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline CMPGlitch source/plan audit. Never opens a GPU or invokes live tools."""
+"""Offline reference toolkit source/plan audit. Never opens a GPU or invokes live tools."""
 import argparse
 import ast
 import contextlib

@@ -16,8 +16,8 @@ at runtime. The embedded constants define this version's behavior even if upstre
 changes. FF locations are research mappings, not an official NVIDIA specification.
 
 The individual Gen3 location remains unresolved. The optional `pcie-gen3-pair`
-feature comes from the user-supplied CMPGlitch checkout: `cmp_gen3.md` (PCIe fuse
-burns), `cmp_gen4_retrain_analysis.md` section 1.2, and
+feature comes from the user-supplied reference toolkit checkout: the Gen3 burn record (PCIe fuse
+burns), the PCIe retraining analysis, section 1.2, and
 `tools/ff_derive_pcie.py`. They document clearing block-39 data bits 1 and 9
 together, not independent identification. No upstream URL for that checkout is
 asserted here, and those source files are not bundled. This local experimental
@@ -39,13 +39,13 @@ used as targets or guarantees for other cards.
 
 
 [AUDIT.md](AUDIT.md) describes the additional read-only review of all 16 supplied
-CMPGlitch tool scripts and their reference fixture. The optional validator reads
+reference tool scripts and their reference fixture. The optional validator reads
 that separately supplied source and compiles selected isolated functions for
-synthetic reproductions. No CMPGlitch script, card capture, audit output, private
+synthetic reproductions. No reference toolkit script, card capture, audit output, private
 physical map or legacy burner is redistributed in this package.
 
 
-The original `ffburn.py3` implements CMPGlitch's main-array IDLE/address/WDATA/
+The original `ffburn.py3` implements the reference toolkit's main-array IDLE/address/WDATA/
 CMD_WRITE/poll/readback protocol and public prerequisites described in
 `tools/ff_burn.py` and the supplied burn record. It adds exact public-plan
 regeneration and baseline checks, shared capture locking, restricted MMIO ports,
@@ -53,3 +53,8 @@ DEBUGCTRL=0, checks after durable intent and after staging data, failure-stop
 logging and repeated full-array verification. It performs no supply/GPIO/reset,
 override setup, SENSE, RIR, ROM flashing or training. No hardware validation is
 claimed; [BURNER.md](BURNER.md) documents its interfaces and limits.
+
+
+Credit to **xPatrik (Discord)** for research contributions and supplied reference
+material. Source labels describe provenance; they do not establish validation
+of empirical mappings on other cards.

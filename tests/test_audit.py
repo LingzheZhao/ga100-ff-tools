@@ -1,9 +1,9 @@
-"""Synthetic independent-validator checks; no CMPGlitch checkout or GPU needed."""
+"""Synthetic independent-validator checks; no reference toolkit checkout or GPU needed."""
 from importlib.machinery import SourceFileLoader
 from pathlib import Path
 import unittest
 
-v = SourceFileLoader('audit_validator', str(Path(__file__).resolve().parents[1]/'validate_cmpglitch.py3')).load_module()
+v = SourceFileLoader('audit_validator', str(Path(__file__).resolve().parents[1]/'validate_reference.py3')).load_module()
 
 class AuditTests(unittest.TestCase):
     def test_iff_stops_before_later_record(self):

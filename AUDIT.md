@@ -1,15 +1,15 @@
-# CMPGlitch source audit
+# Reference tools source audit
 
-The review covered all 16 Python tools in the supplied CMPGlitch `tools/`
+The review covered all 16 Python tools in the supplied reference toolkit `tools/`
 checkout and its reference `ff.json`. This public report contains no user dumps,
 card identifiers, generated plans, local paths or proprietary fuse maps.
-CMPGlitch source files are not bundled. No live tool was run.
+Reference tool source files are not bundled. No live tool was run.
 
 ## Confirmed software agreement
 
 The capture/planner offsets, floorsweep and PES/ROP field ranges, NVLink low-three
 bits, shifted 16-bit device IDs, Gen3 candidate pair and PCIe boot gates agree
-with CMPGlitch's declarations. Offline validation of the user's three combined
+with the reference toolkit's declarations. Offline validation of the user's three combined
 plans found no record discrepancies. The validator independently checks physical
 row decoding, field targets, defect retention, untouched bits, append rows, IFF
 boundary, record encoding, hashes and saved simulation results.
@@ -63,15 +63,15 @@ override helper or PHY writer is bundled. Hardware qualification remains absent.
 
 ## Reproduce offline
 
-The optional `validate_cmpglitch.py3` needs this package's adjacent planner and
-capture scripts, a separately obtained trusted CMPGlitch `tools/` checkout, and
+The optional `validate_reference.py3` needs this package's adjacent planner and
+capture scripts, a separately obtained trusted reference toolkit `tools/` checkout, and
 your own captures and saved full-conversion previews. It performs no network
 fetch and opens no hardware. Unlike the two primary standalone scripts, this
 validator intentionally uses the adjacent scripts as declarations.
 
 ```sh
-python3 validate_cmpglitch.py3 \
-  --tools /path/to/CMPGlitch/tools \
+python3 validate_reference.py3 \
+  --tools /path/to/reference-tools \
   --plans /path/to/plans \
   --dumps /path/to/captures \
   --output validation.json

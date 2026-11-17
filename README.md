@@ -4,17 +4,19 @@ Public-source GA100/CMP 170HX fuse capture, per-card FF planning, replay
 simulation, and guarded programming tools.
 
 Standalone capture/planning tools for Python 3.8+, using public register references and
-published FF mappings, plus explicitly labeled CMPGlitch experimental findings. All register constants are embedded. The standard library
+published FF mappings and explicitly labeled supplied research findings.
+All register constants are embedded. The standard library
 is sufficient; no NVIDIA headers, register JSON files, original project folders,
 network access or Python packages are required at runtime. An optional offline
-CMPGlitch validator is also included; it uses the adjacent primary scripts.
+reference-source validator is also included; it uses the adjacent primary scripts.
 
 - `capture.py3`: Linux option/status capture, with optional physical-row reads.
 - `ffplan.py3`: offline per-card planning and logical FF replay simulation.
 - `ffburn.py3`: optional public-plan burner; offline review by default, explicit
-  Linux programming opt-in. Requires the adjacent planner; see [BURNER.md](BURNER.md).
-- `validate_cmpglitch.py3`: optional independent source/plan audit against a
-  separately supplied trusted CMPGlitch tools checkout.
+  Linux programming opt-in. Requires the adjacent planner and three interactive confirmations before programming;
+  see [BURNER.md](BURNER.md).
+- `validate_reference.py3`: optional independent source/plan audit against a
+  separately supplied trusted reference tools.
 
 Public references are documented in [SOURCES.md](SOURCES.md). This directory
 contains no real-card captures, identifiers, calibration profiles, ROMs or
@@ -120,14 +122,14 @@ Use one combined plan so features share a single physical-row allocation.
 ### Experimental Gen3 pair
 
 `--features pcie-gen3-pair` explicitly clears chain 2, block 39, **data bits 1
-and 9** (mask `0x0202`). CMPGlitch reports `0x0782 -> 0x0580` followed by
+and 9** (mask `0x0202`). The supplied research reports `0x0782 -> 0x0580` followed by
 `NV_FUSE_OPT_DISABLE_GEN3_SPEED` (`0x820250`) reading zero. Its derivation script
 explicitly leaves the individual controlling bit unresolved. The planner models
 the combined FF edit, preserves all other block bits, and does not predict the
 speed-disable shadow or establish working Gen3. Required evidence includes the
 observed original block, IFF boundary and repeated speed-disable shadow.
 
-This option incorporates the supplied CMPGlitch experimental findings; it is not
+This option incorporates the supplied experimental findings; it is not
 attributed to Kate's published bit map. Plans selecting it carry
 `public_sources_only: false` and explicit experimental evidence metadata, even
 though this package contains no proprietary maps or driver code.
@@ -190,8 +192,8 @@ physical fuse programming. This package does not add a live restore operation.
 
 ## Other capture formats and incomplete evidence
 
-The planner also accepts earlier two-pass `raw_rows` captures and CMPGlitch's
-indexed `rows`/`ff_rows` objects. For a CMPGlitch dump with only one read pass:
+The planner also accepts earlier two-pass `raw_rows` captures and
+indexed `rows`/`ff_rows` objects from reference tools. For a single-pass dump:
 
 ```sh
 python3 ffplan.py3 plan --baseline ff-first.json --repeat ff-second.json --defects defects.json --output preview.json
@@ -227,7 +229,7 @@ See [BURNER.md](BURNER.md) for live preflight, exact-plan execution, required
 external preparation, durable journals and failure behavior. No hardware setup,
 voltage, override, reset, ROM flashing or retry is automated.
 
-## CMPGlitch validation
+## Reference-source validation
 
 See [AUDIT.md](AUDIT.md) for the complete source review, confirmed software
 agreement, defects in the reference tools, and reproducible offline validation.
@@ -245,3 +247,15 @@ Tests exercise the capture-to-plan pipeline, read-only mapping, command-write
 restrictions, deadlines, partial reads, restoration failures, required defect
 evidence, cross-card rejection, default Gen3 pair selection, experimental pair preservation and FF replay. All use
 ordinary files or in-memory adapters. They do not qualify hardware operation.
+
+
+The programming path requires three exact interactive confirmations (card BDF,
+full plan ID, and `BURN N ROWS`). All live guards and baseline reads follow the
+prompts. Regenerate plans after planner metadata changes; source hashes and
+plan IDs bind each plan to its current evidence and specification.
+
+## Credits
+
+- **xPatrik (Discord)** — research contributions and reference material.
+- **Kate Land** — published GA100 voltage-glitching research, FF mappings and
+  public register references; see [SOURCES.md](SOURCES.md).

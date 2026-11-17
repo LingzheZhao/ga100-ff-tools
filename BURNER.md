@@ -3,9 +3,9 @@
 `ffburn.py3` consumes `ga100-public-ff-plan-v2` files from the adjacent
 `ffplan.py3`. Python 3.8+ and the standard library are sufficient. The planner
 must remain beside the burner; the burner does not use the legacy local engine,
-physical-alias maps, CMPGlitch scripts, GPIO routines or network access.
+physical-alias maps, reference toolkit scripts, GPIO routines or network access.
 
-The implementation follows the CMPGlitch main-array command sequence and adds
+The implementation follows the documented main-array command sequence and adds
 plan regeneration, baseline binding, repeated full-array reads, restricted MMIO
 ports, post-intent prerequisite checks and durable attempt logging. It has been
 validated with injected I/O, not a real GPU. A passing logical plan does not
@@ -22,7 +22,7 @@ the exact plan against its original evidence and reports the rows, words, plan
 ID and limitations. Modified plans and wrong evidence fail. Use the same
 `--repeat` or `--defects` inputs used when planning, if applicable. The burner
 requires two complete matching 512-row passes, including the IFF boundary;
-partial-range CMPGlitch captures alone are insufficient.
+partial-range reference toolkit captures alone are insufficient.
 
 Existing full-conversion plans are consumed directly; no schema translation or
 re-encoding is needed. Regenerate with this package's planner when an older
@@ -86,8 +86,18 @@ sudo python3 ffburn.py3 --baseline card-a-raw.json --plan card-a-plan.json \
 ```
 
 This command is an irreversible OTP programming request. There is no default
-programming, implicit card selection, interactive pause after the final checks,
-retry loop, automatic resume, repair or rollback operation.
+programming or implicit card selection. Programming requires three exact
+interactive confirmations, in order:
+
+1. The selected card's BDF.
+2. The full plan ID.
+3. `BURN N ROWS`, with the exact number of records replacing `N`.
+
+Each incorrect answer, EOF or interruption aborts immediately; there is no prompt
+retry or noninteractive bypass. Offline review and preflight do not prompt.
+All live prerequisite checks and both full baseline passes run after the final
+confirmation, with fresh per-record checks immediately before programming.
+There is no retry loop, automatic resume, repair or rollback operation.
 
 Before each record the tool syncs a program-intent event, freshly reads the
 selected row as blank, checks prerequisites, stages address/data, and checks

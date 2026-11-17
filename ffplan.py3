@@ -2,7 +2,7 @@
 """GA100 FF planner and logical replay simulator.
 
 Standalone, standard library only. Uses Kate's published FF table and public
-register maps, plus explicitly labeled CMPGlitch experimental findings.
+register maps, plus explicitly labeled reference toolkit experimental findings.
 No private physical aliases, GPIO/supply model, MMIO or hardware
 backend. Inputs are captures; outputs are experimental planning evidence, not
 programming authorization. Option-only captures can produce an incomplete plan.
@@ -58,7 +58,7 @@ GROUPS = {
     'nvlink': ('NVLINK_DISABLE',),
     'a100-device-id': ('PCIE_DEVIDA', 'PCIE_DEVIDB'),
     'pcie-gen4-completion': ('GEN4_DISABLE',),
-    'pcie-gen3-pair': (),  # Local CMPGlitch experiment, not a public bit mapping.
+    'pcie-gen3-pair': (),  # Local reference toolkit experiment, not a public bit mapping.
     'pcie-gen4-bit25': ('GEN4_DISABLE',),
     'pcie-known': ('GEN4_DISABLE', 'PCIE_BOOT_GEN23_DISABLE', 'PCIE_BOOT_GEN3_DISABLE'),
 }
@@ -75,7 +75,7 @@ GEN4_REGISTER_BIT = {
 GEN3_PAIR = {
     'field': 'GEN3_SPEED_GATE_CANDIDATE_PAIR',
     'ff_chain': 2, 'ff_block': 39, 'ff_bits': [1, 9], 'ff_mask': 0x0202,
-    'evidence_source': 'CMPGlitch/cmp_gen3.md; CMPGlitch/tools/ff_derive_pcie.py',
+    'evidence_source': 'Discord user xPatrik: supplied Gen3 burn record and PCIe derivation notes',
     'evidence_kind': 'local experimental combined change',
     'individual_bit_identity_resolved': False,
     'working_gen3_established': False,
@@ -227,7 +227,7 @@ def read_evidence(path):
         require(normalized[0] == normalized[1], 'Selected public option passes disagree')
         opts, options_repeated = normalized[0], True
     else:
-        require('shadow' in capture, 'Unknown capture schema: need samples/options or CMPGlitch shadow')
+        require('shadow' in capture, 'Unknown capture schema: need samples/options or reference toolkit shadow')
         opts = normalize_options(capture['shadow'])
         if 'crc_status' in capture:
             crc = word(capture['crc_status'])
@@ -477,7 +477,7 @@ def make_plan(baseline, groups, repeat=None, defects=None):
                 edit_field(new, field, target)
             edits.append({'field': field, 'old': before, 'target': target,
                           **(GEN4_REGISTER_BIT if field == 'GEN4_DISABLE' else {}),
-                          'target_source': ('CMPGlitch A100 conversion target' if device_id else
+                          'target_source': ('reference toolkit A100 conversion target' if device_id else
                                             'public gate policy' if field in GATE_FIELDS else
                                             evidence['target_origins'].get(defect_name(field))),
                           'evidence_complete': before is not None and target is not None})
@@ -499,7 +499,7 @@ def make_plan(baseline, groups, repeat=None, defects=None):
         edits.append({**GEN3_PAIR, 'old': before, 'target': target,
                       'observed_speed_disable': shadow,
                       'predicted_speed_disable': None,
-                      'target_source': 'explicit CMPGlitch experimental pair policy',
+                      'target_source': 'explicit reference toolkit experimental pair policy',
                       'evidence_complete': before is not None and shadow is not None})
     if 'pcie-gen4-completion' in groups:
         magic = opts.get('NV_FUSE_OPT_PCIE_MAGIC_BITS_D')
@@ -632,7 +632,7 @@ def main(argv=None):
     p.add_argument('--features', nargs='+', choices=GROUPS, default=['memory', 'compute', 'pcie-gen3-pair'],
                    help='Default: memory compute pcie-gen3-pair; explicit selections replace the defaults')
     p.add_argument('--output', help='New JSON file; defaults to stdout; incomplete plans exit 2 and contain no records')
-    p.add_argument('--repeat', help='Separate matching CMPGlitch dump; never invents a second pass')
+    p.add_argument('--repeat', help='Separate matching reference toolkit dump; never invents a second pass')
     p.add_argument('--defects', help='Complete, repeated public register snapshot from the same card')
     p = sub.add_parser('simulate', help='Replay complete public-only plans without hardware access')
     p.add_argument('--baseline', required=True)

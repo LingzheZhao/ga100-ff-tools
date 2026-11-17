@@ -220,6 +220,29 @@ class Controller:
         return passes[0]
 
 
+def confirm_programming(context):
+    """Three exact interactive confirmations; no piped input or automatic bypass."""
+    require(sys.stdin.isatty(), 'Programming requires an interactive terminal for three confirmations')
+    plan = context['plan']
+    count = len(plan['records'])
+    print('IRREVERSIBLE FF PROGRAMMING')
+    print('Card: %s' % plan['bdf'])
+    print('Plan: %s' % plan['plan_id'])
+    print('Records: %d; rows: %s' % (count, ', '.join(str(r['row']) for r in plan['records'])))
+    prompts = (
+        ('1/3 — Type the target BDF: ', plan['bdf']),
+        ('2/3 — Type the full plan_id: ', plan['plan_id']),
+        ('3/3 — Type BURN %d ROWS to confirm permanent OTP programming: ' % count,
+         'BURN %d ROWS' % count),
+    )
+    for prompt, expected in prompts:
+        try:
+            answer = input(prompt)
+        except EOFError:
+            raise ValueError('Confirmation input ended; no programming authorized') from None
+        require(answer.strip() == expected, 'Confirmation did not match; no programming authorized')
+
+
 def run(context, io, journal, execute=False):
     """Injected I/O for tests. Caller supplies and closes the already locked BAR."""
     plan, baseline = context['plan'], context['rows']
@@ -230,6 +253,10 @@ def run(context, io, journal, execute=False):
         journal('session-start', bdf=plan['bdf'], plan_id=plan['plan_id'],
                 planner_sha256=context['planner_sha256'], execute=execute,
                 boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip() if sys.platform == 'linux' else None)
+        if execute:
+            confirm_programming(context)
+            journal('user-confirmed', confirmations=3, bdf=plan['bdf'], plan_id=plan['plan_id'])
+        # All live guards and the complete baseline scan happen after user input.
         ctl.ready()
         saved = ctl.rd(ADDR)
         require(0 <= saved < 512, 'Original row address is invalid')
@@ -294,7 +321,7 @@ def main(argv=None):
     parser.add_argument('--bdf', help='Required explicit card selection for live operations; must match plan')
     modes = parser.add_mutually_exclusive_group()
     modes.add_argument('--preflight', action='store_true', help='Live burn-window checks and two raw READ passes; no programming')
-    modes.add_argument('--execute-plan', metavar='PLAN_ID', help='Program the exact validated plan; irreversible')
+    modes.add_argument('--execute-plan', metavar='PLAN_ID', help='Program the exact validated plan after three interactive confirmations; irreversible')
     parser.add_argument('--journal', help='Required new durable journal for any live operation')
     args = parser.parse_args(argv)
     context = prepare(args.baseline, args.plan, args.repeat, args.defects, args.bdf)
