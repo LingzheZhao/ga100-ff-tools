@@ -32,7 +32,11 @@ the exact plan against its original evidence and reports the rows, words, plan
 ID and limitations. Modified plans and wrong evidence fail. Use the same
 `--repeat` or `--defects` inputs used when planning, if applicable. The burner
 requires two complete matching 512-row passes, including the IFF boundary;
-partial-range reference toolkit captures alone are insufficient.
+partial-range reference toolkit captures alone are insufficient. The planner now
+also requires matching IFF_RECORD observations reconciled with the raw bit5 marker;
+older captures without that register produce incomplete plans. Retake the capture
+and regenerate the plan. Exact regeneration also preserves the plan's conversion
+route and proof/restore space budget.
 
 Existing full-conversion plans are consumed directly; no schema translation or
 re-encoding is needed. Regenerate with this package's planner when an older
@@ -62,6 +66,7 @@ invoke it or assume that a successful glitch validates a burn plan.
 | Observation | Required value |
 |---|---|
 | FUSECTRL state bits20:16 | IDLE (4) |
+| IFF_RECORD 0x820050 | Exactly the captured, cross-checked register value; rechecked with every prerequisite check |
 | DEBUGCTRL 0x820060 | 0 (reject RIR and other debug modes) |
 | CRC_STATUS 0x820070 | 0x55 |
 | DSOV 0x820084 | 0 |
@@ -148,3 +153,11 @@ per-card validation before hardware use.
 The journal is exclusively created with permissions 0600 and fsyncs events plus
 the initial parent directory entry. Existing journals are never overwritten or
 appended. Logs contain card identifiers and observations; keep them private.
+
+
+Planner checkpoints and proof/restoration previews are offline review metadata,
+not a burn schedule. The public programming CLI does not implement one-record /
+cold-boot / recapture campaigns or no-op proof gates. Its same-session raw-row
+verification does not replace cold-boot verification and can fail if a prepared
+window loses readable state. No checkpoint claims bootability; intermediate
+floorsweep states may not boot. Agents must never run the burner or checkpoints.

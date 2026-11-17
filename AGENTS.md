@@ -57,7 +57,10 @@ path as the baseline in the next commands rather than copying or editing it.
 
 Default scope is memory, compute, and the experimental Gen3 candidate pair.
 State this scope explicitly. Only add other feature selections when requested;
-review their mapping uncertainty and ROM/hardware dependencies first.
+review their mapping uncertainty and ROM/hardware dependencies first. Use the
+explicit route: `cmp` by default, `a100` for requested identity conversion, and
+`empirical` only for a requested extra MAGIC_D experiment. SYS_PIPE is opt-in.
+Do not imply that it unlocks ECC or NVDEC.
 
 ```sh
 python3 ffplan.py3 plan --baseline "$RUN_DIR/capture.json" \
@@ -65,11 +68,17 @@ python3 ffplan.py3 plan --baseline "$RUN_DIR/capture.json" \
 ```
 
 Inspect `status`, `missing_evidence`, `ff_boundary_evidence`, source hashes, `field_edits`,
-`register_effects`, `records`, and the IFF boundary. Require targets to retain
+`register_effects`, `records`, `dependency_checks`, `space_budget`,
+`cold_boot_checkpoints`, and the IFF boundary. Account for one restoration row
+per changed block, requested proof-row budget, and the software spare margin.
+Proof encodings have no assigned row or selection; proof/restoration previews
+allocate no executable records. Never execute a
+checkpoint or claim it is bootable or cold-boot verified. Require targets to retain
 reported defects and unrelated block bits. Rows must be observed trailing blanks
 before the first observed record with bit5 set (`word & 0x20`). Never assume
-row488 or treat eight zero rows as proof of the boundary. IFF_RECORD is not
-cross-checked by this release. Never invent an IFF boundary, repeat pass, identity,
+row488 or treat eight zero rows as proof of the boundary. Require the repeated
+IFF_RECORD START/LAST to be valid and START to match the raw bit5 marker. Old
+captures without that register require recapture; do not synthesize the value. Never invent an IFF boundary, repeat pass, identity,
 missing register, fuse location, or defect mask.
 
 Exit 2 means incomplete evidence (or CLI usage error); inspect the diagnostic

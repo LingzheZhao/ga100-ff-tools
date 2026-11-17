@@ -35,6 +35,7 @@ class FakeBar:
         self.regs = {off: 0 for off in c.REGISTERS.values()}
         self.regs.update({c.FUSECTRL: 0xe0040000, c.CRC_STATUS: 0x55, 0: 0x10000001})
         self.regs.update({off: 0xffffffff for name, off in c.CORE.items() if name.endswith('_PLM')})
+        self.regs[c.CORE['IFF_RECORD']] = (507 << 16) | 488
         self.regs[c.CORE['DISABLE_SW_OVERRIDE_STATUS']] = 1
         self.regs[c.CORE['ENABLE_FUSE_PROGRAM_STATUS']] = 1
         self.regs[c.OPTIONS['NV_FUSE_OPT_SECURED_BURN_FEATURE_ENABLE']] = 1
@@ -241,6 +242,7 @@ class ToolTests(unittest.TestCase):
         # Push the last occupied FF row to 303, then put IFF at 310, not 488.
         self.io.rows[303]=next(value for value in self.io.rows if value and value&31==2 and not value&32)
         self.io.rows[310]=0x12340020
+        self.io.regs[c.CORE['IFF_RECORD']] = (329 << 16) | 310
         report=self.capture()
         self.assertEqual(report['ff_boundary_observation']['first_iff_row'],310)
         self.assertEqual(report['ff_boundary_observation']['trailing_blank_rows'],6)
@@ -254,7 +256,7 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(evidence['first_iff_word'],1<<5)
         self.assertEqual(evidence['remaining_blank_rows_after_plan'],
                          evidence['observed_trailing_blank_rows']-len(plan['records']))
-        self.assertFalse(evidence['iff_register_checked'])
+        self.assertTrue(evidence['iff_register_checked'])
         self.assertFalse(evidence['eight_zero_rule_assumed'])
         self.assertEqual(evidence['software_reserved_rows'],16)
 

@@ -173,20 +173,32 @@ selection:
 | Feature | Proposed change | Limits |
 |---|---|---|
 | `pcie-gen4-completion` | Clear block46 bit13; block47 bits0,4,6 and the known bit3. | One-die empirical map; verify with a per-card volatile test before hardware use. Individual mapping of bits0,4,6 to MAGIC_D bits22,26,28 is unknown. |
-| `nvlink` | Chain1 block23 bits0–2 to captured NVLINK_DEFECTIVE. | Other block bits, including SYS_PIPE, preserved; never assumes no defective links. Hardware/ROM work needed; bring-up untested. |
+| `nvlink` | Chain1 block23 bits0–2 to captured NVLINK_DEFECTIVE. | Other block bits, including SYS_PIPE unless selected separately, preserved; never assumes no defective links. Hardware/ROM work needed; bring-up untested. |
+| `sys-pipe` | Chain1 bits372–379, block23 bits4–11, to captured SYS_PIPE_DEFECTIVE. | Optional; preserves bit3 and NVLink bits. MIG enumeration reported on a reference die; ECC/NVDEC/media operation unproven. |
 | `a100-device-id` | DEVIDA/B `0x20c2 -> 0x20b5` through chain2 blocks37/38. | Preserves adjacent bits; adds required bits to fresh FF replacement records. Requires a matching signed A100 ROM; CMP ROM alone is not functional after conversion. |
 
 Capture now includes public `NV_FUSE_OPT_NVLINK_DEFECTIVE` at `0x82068c`. Old
 captures lacking it give incomplete NVLink plans, never a zero target.
 
-For a full offline preview including all six reference passes:
+Choose the intended route explicitly. `--route cmp` (default) keeps the CMP
+identity and rejects device-ID changes. `--route a100` permits a requested
+`a100-device-id` feature and preserves the additional MAGIC_D groups. The route
+does not automatically select features. A100-ROM Gen4 operation has been
+reported with MAGIC_D `0x14680000`; `0x00200000` is not a universal requirement.
+
+An A100-route preview, retaining the unknown SYS_PIPE/media behavior by default:
 
 ```sh
-python3 ffplan.py3 plan --baseline card-a.json --features memory compute pcie-gen3-pair pcie-known pcie-gen4-completion nvlink a100-device-id --output conversion-preview.json
+python3 ffplan.py3 plan --baseline card-a.json --route a100 --features memory compute pcie-gen3-pair pcie-known nvlink a100-device-id --proof-rows 2 --output conversion-preview.json
 python3 ffplan.py3 simulate --baseline card-a.json --plan conversion-preview.json
 ```
 
-The Gen4 model checks that each observed FF group and its shadow group agree
+Only use `--route empirical` with an explicit `pcie-gen4-completion` selection
+to preview the extra MAGIC_D experiment. The A100 route rejects that selection;
+it is never silently added. `sys-pipe` is a separate explicit feature and is not
+implied by NVLink, identity conversion, or either route.
+
+The empirical Gen4 model checks that each observed FF group and its shadow group agree
 with the reference pattern (all set or all clear); unsupported partial groups
 are rejected. It merges overlapping Gen4 edits into one record per block. With
 the reference starting word, sequential `register_effects` end at MAGIC_D
@@ -194,14 +206,18 @@ the reference starting word, sequential `register_effects` end at MAGIC_D
 verification of the mapping on the selected card. Plans explicitly retain
 `hardware_mapping_verified_on_this_card: false` and require per-card volatile
 validation. `public_sources_only` is false for experimental Gen3, Gen4 completion
-or device-ID policies; this denotes supplied research provenance, not proprietary
+or device-ID/SYS_PIPE policies; this denotes supplied research provenance, not proprietary
 code. The planner performs no live probe, burn, ROM flashing or device reconfiguration.
 The separate burner requires explicit execution and an externally prepared setup.
 
 The planner keeps PES in compute and ROP_L2 in memory; the default combined
 selection covers the reported GSP boot failure from incomplete floorsweeping.
-The reference's 128 SM and full FMA speed require driver overrides; an A100 ROM
-alone reportedly exposes 124 SM. No ECC fuse or SM_SPEED throttle change is
+Compute selections now require the final logical PES and ROP/L2 masks to match
+their captured defect masks. A compute-only plan with unresolved ROP/L2 produces
+an incomplete preview with no records; include `memory compute`, or supply a
+baseline where ROP/L2 already matches its defect mask.
+Native versus override SM counts and FMA speed are die/driver dependent;
+reference-die counts such as 124/128 are not universal targets. No ECC fuse or SM_SPEED throttle change is
 planned. ECC, NVLink, memory integrity and working link speed are not proven by
 FF replay. `conversion_findings` embeds these limits in generated plans.
 Appending restoration records consumes permanent OTP space; it does not undo
@@ -249,11 +265,47 @@ marker, for example at row310, reduces available append space; insufficient
 space rejects planning. Missing boundaries leave plans incomplete, while
 ambiguous all-ones/PRI-like words are never guessed past.
 
-**IFF_RECORD is not captured or cross-checked by this release.** Boundary evidence
-explicitly records `iff_register_checked: false`. The type-bit model and spare-row
-policy are not proof of controller behavior or programming eligibility. Regenerate
-older plans after this metadata/specification update. Manually inspect the bound
-before considering any hardware operation; agents must never burn.
+Capture reads `IFF_RECORD` at `0x820050` in both option snapshots. The planner
+extracts START `[8:0]` and inclusive LAST `[24:16]`, validates
+`222 <= START <= LAST < 512`, and requires START to equal the raw bit5 boundary.
+Contradictory ranges/markers fail validation. Missing repeated IFF_RECORD evidence
+leaves the plan incomplete with no records; **old captures require recapture**.
+The register is a writable current execution range, not immutable geometry.
+`iff_register_checked: true` records agreement, not hardware qualification.
+
+The type-bit model, register cross-check and spare-row policy do not establish
+programming eligibility. Regenerate older plans after this specification update.
+Manually inspect the boundary before any hardware operation; agents must never burn.
+
+## Proof, restoration and checkpoint previews
+
+`space_budget` counts functional records, one reserved restoration row per changed
+block, the requested `--proof-rows N` (default zero), and 16 additional spare rows.
+Insufficient total capacity rejects a complete plan. `remaining_blank_rows_after_plan`
+is the physical space after functional records; the stricter
+`remaining_after_all_reservations` subtracts restoration, proof and spare budgets.
+These reservations do not allocate, occupy or program rows.
+
+`proof_preview` records the requested budget and, for complete evidence, lists
+unallocated no-op encoding candidates from declared blocks untouched by the
+functional plan. Each duplicates its observed current value and verifies unchanged
+logical replay, but has `row: null`, no chosen candidate or execution order, and
+`physical_no_op_established: false`. Incomplete evidence withholds candidates.
+A no-op is still an irreversible write; select and allocate it only through
+independent human review and fresh evidence. `restoration_preview` lists the
+original block values but deliberately allocates no executable restore records.
+A real restoration requires fresh post-change evidence and consumes more OTP.
+
+`cold_boot_checkpoints` and simulation results show one logical prefix per record,
+with the current PES/ROP dependency state. They never claim an intermediate state
+boots, that a cold boot occurred, or that a stage works. Intermediate floorsweep
+states may be incomplete. They are not execution/resume manifests: after an
+actual hardware change, the old baseline/remaining plan is stale and fresh
+capture and planning are required. Agents must never execute these checkpoints.
+
+SYS_PIPE changes do not identify the separate NVDEC fuse. Neither matching option
+words nor a failed whole-block ECC match proves a complete map or functional ECC.
+No new ECC, NVDEC, SM_SPEED, SKU_ID, ROM or InfoROM operations are implemented.
 
 ## Faster glitching with Pico 2
 

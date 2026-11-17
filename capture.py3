@@ -23,6 +23,7 @@ BLOG = 'https://blog.kate.land/posts/using-voltage-glitching-to-unlock-the-a100/
 PUBLIC_DATA = 'https://github.com/kate-land/ga100vfi/blob/main/gpu0-registers/crates/gpu0-capture/data/'
 OPTIONS_SOURCE = PUBLIC_DATA + 'ga100-options.json'
 CORE_SOURCE = PUBLIC_DATA + 'ga100-core.json'
+SUPPLIED_MAP_SOURCE = 'User-supplied GA100 FF burn map, 2026-11-17'
 RAW_SOURCE = 'https://github.com/kate-land/ga100vfi/blob/main/gpu0-registers/crates/gpu0-capture/src/lib.rs'
 
 # Names selected from the blog's FF table; addresses independently checked
@@ -51,13 +52,15 @@ OPTIONS = {
     'NV_FUSE_OPT_PCIE_DEVIDA': 0x008204d8,
     'NV_FUSE_OPT_PCIE_DEVIDB': 0x0082056c,
     'NV_FUSE_OPT_SYS_PIPE_DISABLE': 0x008203a4,
+    'NV_FUSE_OPT_SYS_PIPE_DEFECTIVE': 0x008203ac,
     # Also explicitly discussed in the blog's floorsweeping/burn sections.
     'NV_FUSE_OPT_FBP_DEFECTIVE': 0x008205cc,
     'NV_FUSE_OPT_SECURED_BURN_FEATURE_ENABLE': 0x00821108,
     'NV_FUSE_OPT_SECURE_FUSE_WDATA_WR_SECURE': 0x0082048c,
 }
 # Additional public defect option registers required by the public planner.
-DEFECT_OPTIONS = {'NV_FUSE_OPT_FBIO_DEFECTIVE': 8521172,
+DEFECT_OPTIONS = {'NV_FUSE_OPT_SYS_PIPE_DEFECTIVE': 0x008203ac,
+'NV_FUSE_OPT_FBIO_DEFECTIVE': 8521172,
  'NV_FUSE_OPT_FBPA_DEFECTIVE': 8521168,
  'NV_FUSE_OPT_FBP_DEFECTIVE': 8521164,
  'NV_FUSE_OPT_GPC_DEFECTIVE': 8521156,
@@ -76,6 +79,7 @@ OPTIONS.update(DEFECT_OPTIONS)
 # Blog-discussed controller/security observations. Names/offsets from public core map.
 CORE = {
     'FUSECTRL': 0x00820000,
+    'IFF_RECORD': 0x00820050,
     'CRC_STATUS': 0x00820070,
     'ENABLE_FUSE_PROGRAM_STATUS': 0x00820078,
     'DISABLE_SW_OVERRIDE_STATUS': 0x00820084,
@@ -93,9 +97,11 @@ MAP_SHA256 = hashlib.sha256(json.dumps(REGISTERS, sort_keys=True).encode()).hexd
 
 def register_manifest():
     return {name: {'offset': '0x%08x' % off,
-                   'offset_source': OPTIONS_SOURCE if name in OPTIONS else CORE_SOURCE,
+                   'offset_source': (SUPPLIED_MAP_SOURCE if name == 'IFF_RECORD' else
+                                     OPTIONS_SOURCE if name in OPTIONS else CORE_SOURCE),
                    'selection_source': (OPTIONS_SOURCE if name in DEFECT_OPTIONS else
-                                        BLOG if name in OPTIONS else CORE_SOURCE)}
+                                        BLOG if name in OPTIONS else
+                                        SUPPLIED_MAP_SOURCE if name == 'IFF_RECORD' else CORE_SOURCE)}
             for name, off in REGISTERS.items()}
 
 
@@ -277,6 +283,12 @@ def capture_io(io, report, raw=False):
     report['read_issues'].append(issues)
     sample(io.rd, values, issues)
     report['options_match'] = report['options'][0] == report['options'][1]
+    if raw and report['options_match'] and report.get('ff_boundary_observation', {}).get('status') == 'observed':
+        value = int(report['options'][0]['IFF_RECORD'], 0)
+        first, last = value & 0x1ff, (value >> 16) & 0x1ff
+        boundary = report['ff_boundary_observation']
+        boundary.update(iff_record_raw='0x%08x' % value, iff_start=first, iff_last=last,
+                        iff_register_checked=222 <= first <= last < 512 and first == boundary['first_iff_row'])
     report['complete'] = True
     report['ok'] = report['options_match'] and not any(report['read_issues'])
     if raw:

@@ -65,3 +65,14 @@ separate RP2350/Pico 2 glitching toolchain. Its README reports campaign throughp
 on one tested card; that is an upstream observation, not a benchmark or guarantee
 for these tools. No upstream firmware, wiring implementation, or glitch control
 is bundled or invoked here.
+
+
+The supplied 2026-11-17 GA100 FF burn-map notes provide the IFF_RECORD range
+layout (0x820050, START8:0/LAST24:16), SYS_PIPE defect-register evidence and the
+A100-ROM counterexample to universal extra MAGIC_D clearing. The planner now
+requires repeated register/raw-marker agreement, treats SYS_PIPE as optional,
+and distinguishes CMP/A100/empirical routes. SYS_PIPE's chain coordinate is also
+in Kate's published table; its functional scope remains uncertain. Proof,
+restoration and checkpoint outputs are software planning aids, not validated
+hardware procedures. No claim of ECC's absent FF backing is inferred from a
+failed whole-block comparison.

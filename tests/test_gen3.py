@@ -15,7 +15,8 @@ class Gen3Tests(unittest.TestCase):
         rows = [0]*512
         rows[222] = (0xa782 << 16) | (39 << 6) | 2
         rows[488] = 0x20
-        opts = {'NV_FUSE_CRC_STATUS': 0x55, 'NV_FUSE_OPT_DISABLE_GEN3_SPEED': 1}
+        opts = {'NV_FUSE_CRC_STATUS': 0x55, 'NV_FUSE_OPT_DISABLE_GEN3_SPEED': 1,
+                'NV_FUSE_IFF_RECORD': (507 << 16) | 488}
         self.capture = {'bdf': '0000:01:00.0', 'pci_device': '0x20c2',
                         'options': [opts.copy(), opts.copy()], 'raw_rows': [rows[:], rows[:]]}
     def plan(self):

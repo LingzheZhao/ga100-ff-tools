@@ -54,6 +54,7 @@ def decode(rows):
     for row in range(222, len(rows)):
         value = rows[row]
         require(value >> 16 != 0xbadf, 'PRI response in FF range')
+        require(value != 0xffffffff, 'Ambiguous all-ones FF word')
         if value & IFF_TYPE_MASK:
             return blocks, last+1, row
         if not value:
@@ -87,8 +88,6 @@ def audit(tools, plans, dumps, card_names=None):
     reference += [('OPT_TPC_DISABLE_GPC'+str(i), 1, 187+8*i, 194+8*i) for i in range(8)]
     for name, chain, lo, hi in reference:
         field = canonical(name)
-        if field == 'SYS_PIPE_DISABLE':
-            continue  # Preserved, not edited by our policies.
         require(tuple(fields[field][:3]) == (chain, lo, hi-lo+1), 'FF mapping mismatch: '+field)
     for name, chain, lo, hi, defect in literal(tools/'ff_derive.py', 'TARGETS'):
         require(tuple(fields[canonical(name)][:3]) == (chain, lo, hi-lo+1), 'derive mapping mismatch')
@@ -157,7 +156,9 @@ def audit(tools, plans, dumps, card_names=None):
         capture = json.loads(baseline.read_text())
         require(capture['options'][0] == capture['options'][1], card+': option repeat mismatch')
         require(capture['raw_rows'][0] == capture['raw_rows'][1], card+': physical repeat mismatch')
-        opts = {n: number(v) for n, v in capture['options'][0].items()}
+        opts = {('NV_FUSE_CRC_STATUS' if n in ('CRC_STATUS', 'crc_status') else
+                 'NV_FUSE_IFF_RECORD' if n == 'IFF_RECORD' else n): number(v)
+                for n, v in capture['options'][0].items()}
         require(opts['NV_FUSE_CRC_STATUS'] == 0x55, card+': CRC mismatch')
         rows = [number(v) for v in capture['raw_rows'][0]]
         require(len(rows) == 512, card+': incomplete array')
@@ -168,10 +169,22 @@ def audit(tools, plans, dumps, card_names=None):
         payload = {k: v for k, v in plan.items() if k != 'plan_id'}
         calculated = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         require(plan['plan_id'] == calculated, card+': plan hash mismatch')
-        require(set(plan['features']) == {'memory','compute','pcie-gen3-pair','pcie-known','pcie-gen4-completion','nvlink','a100-device-id'}, card+': scope mismatch')
+        require(plan['status'] == 'logical-plan-complete', card+': plan is incomplete')
+        require(plan['features'] and set(plan['features']) <= set(ns['GROUPS']), card+': scope mismatch')
+        route = plan.get('route')
+        require(route in ('cmp', 'a100', 'empirical'), card+': missing/invalid route')
+        require('pcie-gen4-completion' not in plan['features'] or route == 'empirical', card+': MAGIC_D route mismatch')
+        require('a100-device-id' not in plan['features'] or route in ('a100', 'empirical'), card+': identity route mismatch')
+        iff = opts.get('NV_FUSE_IFF_RECORD', opts.get('IFF_RECORD'))
+        require(iff is not None, card+': repeated IFF_RECORD evidence is missing')
+        require((iff & 0x1ff) == boundary and boundary <= ((iff >> 16) & 0x1ff) < 512,
+                card+': IFF register/raw marker disagreement')
+        selected_fields = {field for feature in plan['features'] for field in ns['GROUPS'][feature]}
         desired = dict(before)
         expected_fields = {}
         for field, (chain, lo, width, _) in fields.items():
+            if field not in selected_fields:
+                continue
             observed = (opts['NV_FUSE_OPT_PCIE_MAGIC_BITS_D'] >> 25) & 1 if field == 'GEN4_DISABLE' else opts['NV_FUSE_OPT_'+field]
             require(extract(before, chain, lo, lo+width-1) == observed, card+': FF/shadow mismatch '+field)
             if field in ('PCIE_DEVIDA', 'PCIE_DEVIDB'):
@@ -184,9 +197,11 @@ def audit(tools, plans, dumps, card_names=None):
                 require(target & ~observed == 0, card+': defective units not retained')
             expected_fields[field] = target
             set_bits(desired, chain, lo, lo+width-1, target)
-        desired[2,39] &= ~0x0202
-        desired[2,46] &= ~0x2000
-        desired[2,47] &= ~0x0051
+        if 'pcie-gen3-pair' in plan['features']:
+            desired[2,39] &= ~0x0202
+        if 'pcie-gen4-completion' in plan['features']:
+            desired[2,46] &= ~0x2000
+            desired[2,47] &= ~0x0051
         expected_changes = {key: value for key, value in desired.items() if before.get(key, 0) != value}
         got, used = {}, set()
         after_rows = rows[:]
@@ -199,21 +214,33 @@ def audit(tools, plans, dumps, card_names=None):
             got[chain,block] = data;used.add(row);after_rows[row] = encoded
         require(got == expected_changes, card+': final blocks differ from independent policy')
         require(sorted(used) == list(range(start, start+len(got))), card+': unexpected allocation')
-        require(boundary-start-len(got) >= 16, card+': reserve mismatch')
+        budget = plan['space_budget']
+        proofs = budget['proof_rows_reserved']
+        require(type(proofs) is int and 0 <= proofs <= 512, card+': proof reservation mismatch')
+        require(budget['functional_rows'] == len(got) and budget['restore_rows_reserved'] == len(got)
+                and budget['required_rows'] == 2*len(got)+proofs+16
+                and boundary-start >= budget['required_rows'], card+': reserve mismatch')
         replayed, _, replay_boundary = decode(after_rows)
         require(all(replayed.get(k, 0) == desired.get(k, 0) for k in set(replayed) | set(desired))
                 and replay_boundary == boundary, card+': independent replay mismatch')
         for field, target in expected_fields.items():
             chain, lo, width, _ = fields[field]
             require(extract(replayed, chain, lo, lo+width-1) == target, card+': target mismatch '+field)
-        require((before[1,23] ^ replayed[1,23]) & ~7 == 0, card+': SYS_PIPE/adjacent NVLink bits modified')
+        mask23 = (7 if 'nvlink' in plan['features'] else 0) | (0xff0 if 'sys-pipe' in plan['features'] else 0)
+        require((before.get((1,23), 0) ^ replayed.get((1,23), 0)) & ~mask23 == 0, card+': adjacent block23 bits modified')
         sim = json.loads((plans/(card+'-simulation.json')).read_text())
         require(sim['plan_id'] == plan['plan_id'] and sim['records_applied'] == len(got), card+': saved simulation mismatch')
         require(sim['public_fields'] == expected_fields, card+': saved field results mismatch')
-        magic = opts['NV_FUSE_OPT_PCIE_MAGIC_BITS_D'] & ~sum(1 << bit for bit in (19,22,25,26,28))
-        require(sim['register_effects'][-1]['after'] == magic, card+': MAGIC model mismatch')
+        magic = opts.get('NV_FUSE_OPT_PCIE_MAGIC_BITS_D')
+        if 'GEN4_DISABLE' in selected_fields:
+            magic &= ~(1 << 25)
+            if 'pcie-gen4-completion' in plan['features']:
+                magic &= ~sum(1 << bit for bit in (19,22,26,28))
+            require(sim['register_effects'][-1]['after'] == magic, card+': MAGIC model mismatch')
+        else:
+            require(not sim['register_effects'], card+': unexpected MAGIC model edits')
         cards.append({'card': card, 'bdf': plan['bdf'], 'passed': True, 'records': len(got),
-                      'row_range': [min(used), max(used)], 'modeled_magic_d': hex(magic),
+                      'row_range': [min(used), max(used)] if used else None, 'modeled_magic_d': hex(magic) if magic is not None else None,
                       'plan_id': plan['plan_id'], 'baseline_sha256': sha(baseline)})
     inventory = []
     for path in sorted(tools.glob('*.py')):

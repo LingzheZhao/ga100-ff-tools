@@ -26,6 +26,7 @@ DEBUG, CRC, EFP, DSOV = 0x820060, 0x820070, 0x820078, 0x820084
 SW, WDATA_SECURE, SBFE = 0x820040, 0x82048c, 0x821108
 WDATA_PLM, CTRL_PLM = 0x8200f4, 0x8200f8
 MAP_SIZE = 0x822000
+IFF_RECORD = 0x820050
 
 # Fuse-controller command field. SENSE is named for protocol completeness;
 # these public adapters intentionally reject it.
@@ -174,8 +175,9 @@ class LinuxBar:
 
 
 class Controller:
-    def __init__(self, io):
+    def __init__(self, io, expected_iff_record=None):
         self.io = io
+        self.expected_iff_record = expected_iff_record
 
     def rd(self, offset, raw=False, plm=False):
         value = self.io.rd(offset)
@@ -191,6 +193,9 @@ class Controller:
         self.io.check_device()
         require(self.idle(), 'Controller is not IDLE')
         require(self.rd(DEBUG) == 0, 'DEBUGCTRL must be zero; RIR/debug mode is unsupported')
+        if self.expected_iff_record is not None:
+            require(self.rd(IFF_RECORD) == self.expected_iff_record,
+                    'Live IFF_RECORD differs from the validated boundary; stop')
         require(self.rd(CRC) == 0x55, 'CRC_STATUS must be 0x55')
         require(self.rd(DSOV) == 0, 'DSOV must be zero; burn window is not ready')
         require(self.rd(EFP) == 1, 'Fuse programming is not enabled')
@@ -262,7 +267,9 @@ def run(context, io, journal, execute=False):
     """Injected I/O for tests. Caller supplies and closes the already locked BAR."""
     plan, baseline = context['plan'], context['rows']
     require(not execute or plan['records'], 'No records to program')
-    ctl = Controller(io)
+    boundary = plan['ff_boundary_evidence']
+    require(boundary['iff_register_checked'], 'Plan lacks a cross-checked IFF boundary')
+    ctl = Controller(io, expected_iff_record=boundary['iff_record_raw'])
     issued, completed = [], []
     try:
         journal('session-start', bdf=plan['bdf'], plan_id=plan['plan_id'],

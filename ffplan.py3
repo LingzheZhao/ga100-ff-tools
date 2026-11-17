@@ -21,6 +21,8 @@ FF_TYPE_BIT = 5
 IFF_TYPE_MASK = 1 << FF_TYPE_BIT
 FF_CHAIN_MASK = IFF_TYPE_MASK - 1
 SPARE_FF_ROWS = 16  # Software policy; not a verified hardware minimum.
+IFF_RECORD_OFFSET = 0x820050
+ROUTES = ('cmp', 'a100', 'empirical')
 # name: chain, first bit, width, public option register address.
 # The locations are empirical mappings published by Kate, not official mappings.
 FIELDS = {
@@ -39,6 +41,7 @@ FIELDS = {
     'FBP_DISABLE': (1, 307, 12, 0x820364),
     'ROP_L2_DISABLE': (1, 319, 24, 0x8202c4),
     'NVLINK_DISABLE': (1, 23*16, 3, 0x820684),
+    'SYS_PIPE_DISABLE': (1, 372, 8, 0x8203a4),
     'PCIE_DEVIDA': (2, 37*16+1, 16, 0x8204d8),
     'PCIE_DEVIDB': (2, 38*16+1, 16, 0x82056c),
     'GEN4_DISABLE': (2, 47*16+3, 1, 0x820520),
@@ -47,7 +50,7 @@ FIELDS = {
 }
 # Defect register ADDRESSES are public; their physical fuse-row aliases are not used.
 DEFECT_REGISTERS = {
-    'NVLINK_DISABLE': 0x82068c,
+    'NVLINK_DISABLE': 0x82068c, 'SYS_PIPE_DISABLE': 0x8203ac,
     'FBIO_DISABLE': 0x8205d4, 'FBPA_DISABLE': 0x8205d0,
     'GPC_DISABLE': 0x8205c4, 'PES_DISABLE': 0x820698,
     'FBP_DISABLE': 0x8205cc, 'ROP_L2_DISABLE': 0x8205e8,
@@ -60,6 +63,7 @@ GROUPS = {
     'memory': ('FBIO_DISABLE', 'FBPA_DISABLE', 'FBP_DISABLE', 'ROP_L2_DISABLE'),
     'compute': ('GPC_DISABLE', 'PES_DISABLE', *(f'TPC_GPC{i}_DISABLE' for i in range(8))),
     'nvlink': ('NVLINK_DISABLE',),
+    'sys-pipe': ('SYS_PIPE_DISABLE',),
     'a100-device-id': ('PCIE_DEVIDA', 'PCIE_DEVIDB'),
     'pcie-gen4-completion': ('GEN4_DISABLE',),
     'pcie-gen3-pair': (),  # Local reference toolkit experiment, not a public bit mapping.
@@ -92,16 +96,17 @@ MAGIC_COMPLETION = (
     {'field': 'MAGIC_D_BITS22_26_28_COMPLETION', 'ff_chain': 2, 'ff_block': 47,
      'ff_mask': 0x0051, 'register_mask': 0x14400000},
 )
-EXPERIMENTAL_FEATURES = frozenset(('pcie-gen3-pair', 'pcie-gen4-completion', 'a100-device-id'))
+EXPERIMENTAL_FEATURES = frozenset(('pcie-gen3-pair', 'pcie-gen4-completion', 'a100-device-id', 'sys-pipe'))
 CONVERSION_FINDINGS = {
     'source': 'User-supplied CMP 170HX -> A100-80G FF Burn Record, passes 1-6',
     'scope': 'One reference die; original rows and defect values are not targets for other cards',
-    'gen4_completion': 'THIS-DIE mapping; per-card volatile validation required before any hardware use',
+    'gen4_completion': 'Reference-die mapping, not universal: an A100-ROM path reportedly trains Gen4 with 0x14680000; empirical route only',
+    'sys_pipe': 'Supplied notes report MIG enumeration only; NVDEC has a separate unmapped disable field; ECC/media operation unproven',
     'gen4_group': 'Block47 bits 0,4,6 jointly map to MAGIC_D bits22,26,28; individual permutation unknown',
     'device_id': '20c2 -> 20b5 requires matching signed A100 ROM; CMP ROM may POST but is not functional',
     'nvlink': 'Defective-only target; U11 modification and ROM check bypass needed; bring-up untested',
-    'compute': 'PES and ROP_L2 must accompany GPC/TPC; native A100 124 vs 128 SM and FMA speed are driver dependent',
-    'ecc': 'No ECC fuse changed; post-conversion ECC unvalidated',
+    'compute': 'PES and ROP_L2 must accompany GPC/TPC; native SM counts and FMA speed are die/driver dependent',
+    'ecc': 'No ECC mapping or burn provided; a failed whole-block match does not prove absence of FF backing; separate ROM/InfoROM claims are unvalidated here',
     'restore': 'Additional records consume permanent OTP space; not physical fuse reversal',
 }
 
@@ -129,6 +134,8 @@ def word(value):
 
 
 def canonical_name(name):
+    if name in ('IFF_RECORD', 'NV_FUSE_IFF_RECORD'):
+        return 'NV_FUSE_IFF_RECORD'
     if name in ('CRC_STATUS', 'crc_status'):
         return 'NV_FUSE_CRC_STATUS'
     if name.startswith('OPT_TPC_DISABLE_GPC'):
@@ -139,7 +146,8 @@ def canonical_name(name):
 def allowed_registers():
     result = {option_name(field): spec[3] for field, spec in FIELDS.items()}
     result.update({defect_name(field): offset for field, offset in DEFECT_REGISTERS.items()})
-    result.update({'NV_FUSE_OPT_DISABLE_GEN3_SPEED': 0x820250,
+    result.update({'NV_FUSE_IFF_RECORD': IFF_RECORD_OFFSET,
+                   'NV_FUSE_OPT_DISABLE_GEN3_SPEED': 0x820250,
                    'NV_FUSE_CRC_STATUS': 0x820070,
                    'NV_FUSE_OPT_PCIE_DEVIDA': 0x8204d8,
                    'NV_FUSE_OPT_PCIE_DEVIDB': 0x82056c})
@@ -275,6 +283,11 @@ def public_spec():
     return {
         'sources': {'ff_locations': BLOG, 'register_offsets': OPTIONS_SOURCE,
                     'controller_status': CORE_SOURCE},
+        'boundary_register': {'name': 'NV_FUSE_IFF_RECORD', 'offset': IFF_RECORD_OFFSET,
+                              'start_bits': [0, 8], 'last_bits': [16, 24],
+                              'provenance': 'User-supplied GA100 FF burn map, 2026-11-17',
+                              'meaning': 'current writable IFF execution range; not immutable geometry'},
+        'routes': list(ROUTES),
         'record_format': {'type_bit': FF_TYPE_BIT, 'iff_type_mask': IFF_TYPE_MASK,
                           'ff_chain_mask': FF_CHAIN_MASK,
                           'boundary': 'first observed type-bit-5 record; zeros do not establish IFF start'},
@@ -287,7 +300,8 @@ def public_spec():
                    for name, (chain, bit, width, offset) in FIELDS.items()},
         'experimental_features': {'pcie-gen3-pair': GEN3_PAIR,
                                   'pcie-gen4-completion': list(MAGIC_COMPLETION),
-                                  'a100-device-id': {'target': '0x20b5', 'rom_required': True}},
+                                  'a100-device-id': {'target': '0x20b5', 'rom_required': True},
+                                  'sys-pipe': {'field': 'SYS_PIPE_DISABLE', 'claim': 'MIG enumeration only; ECC/NVDEC not established'}},
         'conversion_findings': CONVERSION_FINDINGS,
         'unresolved': {'DISABLE_GEN3_SPEED': 'Individual bit unresolved; local pcie-gen3-pair clears candidates 1 and 9 together.'},
     }
@@ -435,11 +449,87 @@ def register_effects(edits, opts, replayed_blocks=None):
     return effects
 
 
-def make_plan(baseline, groups, repeat=None, defects=None):
+def iff_boundary_evidence(opts, rows, start, boundary, missing, repeated):
+    value = opts.get('NV_FUSE_IFF_RECORD')
+    result = {'source': 'raw type bit 5 and repeated IFF_RECORD',
+              'type_bit': FF_TYPE_BIT, 'type_mask': IFF_TYPE_MASK,
+              'first_iff_row': boundary,
+              'first_iff_word': rows[boundary] if boundary is not None else None,
+              'last_occupied_ff_row': start-1 if start is not None else None,
+              'iff_record_raw': value, 'iff_start': None, 'iff_last': None,
+              'iff_register_checked': False, 'eight_zero_rule_assumed': False,
+              'hardware_geometry_established': False}
+    if value is None:
+        missing.append('two matching NV_FUSE_IFF_RECORD observations (0x820050); recapture required')
+        return result
+    first, last = value & 0x1ff, (value >> 16) & 0x1ff
+    require(222 <= first <= last < 512, 'Invalid or inactive IFF_RECORD range')
+    result.update(iff_start=first, iff_last=last)
+    if boundary is not None:
+        require(first == boundary, 'IFF_RECORD START disagrees with the first raw bit-5 marker')
+        result['iff_register_checked'] = bool(repeated)
+    return result
+
+
+def compute_dependencies(blocks, opts, known=True):
+    checks = []
+    for field in ('PES_DISABLE', 'ROP_L2_DISABLE'):
+        target = opts.get(defect_name(field))
+        observed = opts.get(option_name(field))
+        actual = get_field(blocks, field) if known and observed is not None else None
+        checks.append({'field': field, 'required_defect_mask': target,
+                       'logical_mask': actual,
+                       'satisfied': actual is not None and target is not None and actual == target})
+    return checks
+
+
+def proof_preview(old, records, reserved):
+    """Unallocated encoding candidates from untouched, declared FF blocks only."""
+    touched = {(record['chain'], record['block']) for record in records}
+    declared = {(chain, bit//16) for chain, start, width, _ in FIELDS.values()
+                for bit in range(start, start+width)}
+    declared.update((spec['ff_chain'], spec['ff_block']) for spec in MAGIC_COMPLETION)
+    candidates = []
+    if reserved:
+        for chain, block in sorted((declared & set(old)) - touched):
+            data = old[chain, block]
+            replayed = dict(old)
+            replayed[chain, block] = data
+            require(replayed == old, 'Proof candidate would change the logical baseline')
+            candidates.append({'chain': chain, 'block': block, 'data': data,
+                               'word': (data << 16) | (block << 6) | chain,
+                               'row': None, 'logical_no_op_verified': True,
+                               'physical_no_op_established': False})
+    return {'rows_reserved': reserved, 'records_generated': False,
+            'candidates': candidates, 'selection': 'none; independent human review required',
+            'note': 'Encoding candidates only, with no physical row or execution order. Fresh capture and cold-boot verification are required; no automatic proof burns.'}
+
+
+def checkpoint_preview(old, records, opts):
+    """Prefix replay is informative, never a resumable or executable stage plan."""
+    blocks, result = dict(old), []
+    for index, record in enumerate(records, 1):
+        blocks[record['chain'], record['block']] = record['new_block']
+        result.append({'index': index, 'after_row': record['row'],
+                       'logical_records_applied': index,
+                       'compute_dependencies': compute_dependencies(blocks, opts),
+                       'bootability_established': False, 'cold_boot_verified': False,
+                       'fresh_capture_required_before_followup': True,
+                       'note': 'Intermediate masks may be incomplete; not a bootable-stage or execution manifest.'})
+    return result
+
+
+def make_plan(baseline, groups, repeat=None, defects=None, route='cmp', proof_rows=0):
     evidence = load_capture(baseline, repeat, defects)
     opts, rows = evidence['opts'], evidence['rows']
     groups = sorted(set(groups))
     require(groups and all(group in GROUPS for group in groups), 'Invalid feature selection')
+    require(route in ROUTES, 'Invalid conversion route')
+    require(type(proof_rows) is int and 0 <= proof_rows <= 512, 'Invalid proof-row reservation')
+    require('a100-device-id' not in groups or route in ('a100', 'empirical'),
+            'Device-ID changes require explicit --route a100 or --route empirical')
+    require('pcie-gen4-completion' not in groups or route == 'empirical',
+            'Extra MAGIC_D clearing requires --route empirical; it is not a universal A100 conversion requirement')
     old, start, boundary = {}, None, None
     missing = list(evidence['missing'])
     if rows is not None:
@@ -450,6 +540,7 @@ def make_plan(baseline, groups, repeat=None, defects=None):
     new, edits = dict(old), []
     if rows is not None and boundary is None:
         missing.append('contiguous FF observations from row 222 through the first IFF marker; no boundary inferred')
+    boundary_evidence = iff_boundary_evidence(opts, rows, start, boundary, missing, evidence['options_repeated'])
     seen_fields = set()
     for group in groups:
         for field in GROUPS[group]:
@@ -531,11 +622,33 @@ def make_plan(baseline, groups, repeat=None, defects=None):
                           'per_card_volatile_validation_required': True,
                           'hardware_mapping_verified_on_this_card': False,
                           'evidence_complete': before is not None and magic is not None})
+    dependencies = compute_dependencies(new, opts, known=boundary is not None) if 'compute' in groups else []
+    if 'compute' in groups:
+        for field in ('PES_DISABLE', 'ROP_L2_DISABLE'):
+            observed, target = opts.get(option_name(field)), opts.get(defect_name(field))
+            if observed is None or target is None:
+                missing.append('compute dependency evidence: '+field+' and its defect mask')
+            elif boundary is not None:
+                width = FIELDS[field][2]
+                require(0 <= observed < 1 << width and 0 <= target < 1 << width,
+                        'Compute dependency mask exceeds field width: '+field)
+                require(get_field(old, field) == observed, 'Compute dependency FF/shadow mismatch: '+field)
+                if get_field(new, field) != target:
+                    missing.append('compute dependency '+field+' must reach its captured defect mask; include memory with compute')
     records = []
+    space_budget = {'functional_rows': 0, 'proof_rows_reserved': proof_rows,
+                    'restore_rows_reserved': 0, 'software_reserved_rows': SPARE_FF_ROWS,
+                    'observed_trailing_blank_rows': boundary-start if boundary is not None else None,
+                    'required_rows': None, 'remaining_after_all_reservations': None}
     if not missing:
         changed = [(key, data) for key, data in sorted(new.items()) if data != old.get(key, 0)]
         # Reserve 16 rows as a software planning policy, not a hardware specification.
-        require(start+len(changed)+SPARE_FF_ROWS <= boundary, 'Insufficient observed trailing FF space')
+        required = 2*len(changed) + proof_rows + SPARE_FF_ROWS
+        space_budget.update(functional_rows=len(changed), restore_rows_reserved=len(changed),
+                            required_rows=required,
+                            remaining_after_all_reservations=boundary-start-required)
+        require(start+required <= boundary,
+                'Insufficient observed trailing FF space for functional, proof, restore and spare reservations')
         for i, ((chain, block), data) in enumerate(changed):
             require((chain, block) in old, 'Touched block has no explicit original record; default bits are unverified')
             row = start+i
@@ -555,6 +668,14 @@ def make_plan(baseline, groups, repeat=None, defects=None):
                                    for feature in sorted(EXPERIMENTAL_FEATURES.intersection(groups))}}
            if EXPERIMENTAL_FEATURES.intersection(groups) else {}),
         'sources': public_spec()['sources'], 'bdf': evidence['bdf'], 'features': groups,
+        'route': route, 'space_budget': space_budget, 'dependency_checks': dependencies,
+        'cold_boot_checkpoints': checkpoint_preview(old, records, opts),
+        'proof_preview': proof_preview(old, records, proof_rows) if not missing else
+                         {'rows_reserved': proof_rows, 'records_generated': False, 'candidates': [],
+                          'note': 'Incomplete evidence; proof encodings withheld.'},
+        'restoration_preview': {'rows_reserved': len(records), 'rows_allocated': False,
+                                'blocks': [{'chain': r['chain'], 'block': r['block'], 'original_data': r['old_block']} for r in records],
+                                'note': 'Original values only. Fresh post-change evidence is required before allocating restoration rows; no physical undo or automatic restore.'},
         'input_files_sha256': evidence['sources'], 'public_spec_sha256': digest(public_spec()),
         'specimen': {'capture_bdf': evidence['bdf'], 'gpu_uuid': evidence['uuid'],
                      'physical_observation_sha256': digest(sorted(rows.items())) if rows is not None else None,
@@ -570,26 +691,20 @@ def make_plan(baseline, groups, repeat=None, defects=None):
         'missing_evidence': sorted(set(missing)), 'field_edits': edits, 'records': records,
         'register_effects': register_effects(edits, opts),
         'iff_boundary': boundary,
-        'ff_boundary_evidence': {
-            'source': 'first observed raw record with bit 5 set',
-            'type_bit': FF_TYPE_BIT, 'type_mask': IFF_TYPE_MASK,
-            'first_iff_row': boundary,
-            'first_iff_word': rows[boundary] if boundary is not None else None,
-            'last_occupied_ff_row': start-1 if start is not None else None,
+        'ff_boundary_evidence': {**boundary_evidence,
             'observed_trailing_blank_rows': boundary-start if boundary is not None else None,
             'remaining_blank_rows_after_plan': boundary-start-len(records) if boundary is not None else None,
-            'software_reserved_rows': SPARE_FF_ROWS,
-            'iff_register_checked': False,
-            'eight_zero_rule_assumed': False,
-        },
+            'software_reserved_rows': SPARE_FF_ROWS},
         'physical_defect_aliases_verified': False,
         'programming_eligibility_established': False,
-        'limitations': ['Public defect option values are not independently checked against physical aliases.',
+        'limitations': ['SYS_PIPE changes do not establish ECC, NVDEC or media-engine enablement.',
+                        'Cold-boot checkpoints are logical previews only; no successful boot or stage is established.',
+                        'Public defect option values are not independently checked against physical aliases.',
                         'Gen3 block-39 ambiguity is unresolved; clearing MAGIC_D[25] alone does not establish working Gen4.',
                         'MAGIC_D completion uses one-die empirical groups; per-card volatile validation is required before hardware use.',
                         'Device-ID conversion requires a matching ROM; NVLink and ECC operation are not established.',
                         'Logical FF replay only; no controller, voltage, GPIO or programming-supply model.',
-                        'Distinct planning schema; not compatible with the existing live burner.'],
+                        'Public planning schema; incompatible with the separate legacy burner manifest.'],
     }
     result['plan_id'] = digest(result)
     return result
@@ -618,7 +733,9 @@ def validate_records(records, rows, start, boundary, allow_gen3_pair=False):
 
 
 def simulate(baseline, plan, repeat=None, defects=None):
-    require(plan == make_plan(baseline, plan['features'], repeat, defects),
+    require(plan == make_plan(baseline, plan['features'], repeat, defects,
+                              route=plan.get('route', 'cmp'),
+                              proof_rows=plan.get('space_budget', {}).get('proof_rows_reserved', 0)),
             'Plan differs from regeneration; check card and all input files')
     require(plan['status'] == 'logical-plan-complete', 'Missing evidence prevents FF replay simulation')
     evidence = load_capture(baseline, repeat, defects)
@@ -635,6 +752,9 @@ def simulate(baseline, plan, repeat=None, defects=None):
     return {'simulation_only': True, 'model': 'public FF record replay', 'plan_id': plan['plan_id'],
             'records_applied': len(plan['records']),
             'changed_rows': [i for i in sorted(before) if before[i] != after[i]],
+            'route': plan['route'], 'space_budget': plan['space_budget'],
+            'cold_boot_checkpoints': checkpoint_preview(decode(before)[0], plan['records'], evidence['opts']),
+            'cold_boot_verified': False, 'working_features_verified': False,
             'public_fields': {edit['field']: get_field(blocks, edit['field']) for edit in plan['field_edits']
                               if 'ff_mask' not in edit},
             'experimental_fields': {edit['field']: {**edit, 'replayed_block': blocks.get((edit['ff_chain'], edit['ff_block']))}
@@ -651,6 +771,8 @@ def main(argv=None):
     p.add_argument('--baseline', required=True)
     p.add_argument('--features', nargs='+', choices=GROUPS, default=['memory', 'compute', 'pcie-gen3-pair'],
                    help='Default: memory compute pcie-gen3-pair; explicit selections replace the defaults')
+    p.add_argument('--route', choices=ROUTES, default='cmp', help='Intended path; extra MAGIC_D clearing requires empirical')
+    p.add_argument('--proof-rows', type=int, default=0, help='Reserve space for separately reviewed proof records; generates no proof writes')
     p.add_argument('--output', help='New JSON file; defaults to stdout; incomplete plans exit 2 and contain no records')
     p.add_argument('--repeat', help='Separate matching reference toolkit dump; never invents a second pass')
     p.add_argument('--defects', help='Complete, repeated public register snapshot from the same card')
@@ -663,7 +785,7 @@ def main(argv=None):
     if args.command == 'public':
         result = public_spec()
     elif args.command == 'plan':
-        result = make_plan(args.baseline, args.features, args.repeat, args.defects)
+        result = make_plan(args.baseline, args.features, args.repeat, args.defects, args.route, args.proof_rows)
     else:
         result = simulate(args.baseline, json.loads(Path(args.plan).read_text()), args.repeat, args.defects)
     if getattr(args, 'output', None):

@@ -79,8 +79,9 @@ python3 validate_reference.py3 \
 
 Files must be named `PREFIX-plan.json`, `PREFIX-simulation.json` and
 `PREFIX-raw.json`. Prefixes are discovered from plans, or use `--cards card-a
-card-b`. The validator currently covers the full conversion feature set:
-`memory compute pcie-gen3-pair pcie-known pcie-gen4-completion nvlink
-a100-device-id`. It is not a general validator for every partial-feature plan or
-capture schema. JSON outputs contain local filenames, source hashes, BDFs and
+card-b`. The validator now checks the selected field set across CMP, A100 and
+empirical routes, optional SYS_PIPE, register/bit5 boundary agreement, and
+functional/proof/restoration/spare capacity. Its capture interface still requires
+complete two-pass `raw_rows` plus `options` snapshots; other capture schemas
+are not handled by this optional independent helper. JSON outputs contain local filenames, source hashes, BDFs and
 plan identifiers; review them before publishing. Outputs are exclusively created.

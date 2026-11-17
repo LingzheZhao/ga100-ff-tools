@@ -18,7 +18,7 @@ real_confirm_programming = b.confirm_programming
 class FakeIO:
     def __init__(self, rows):
         self.rows = rows[:]
-        self.reg = {b.CTRL:0xe0040000,b.ADDR:7,b.DEBUG:0,b.CRC:0x55,b.DSOV:0,
+        self.reg = {b.IFF_RECORD:(507<<16)|488,b.CTRL:0xe0040000,b.ADDR:7,b.DEBUG:0,b.CRC:0x55,b.DSOV:0,
                     b.EFP:1,b.SBFE:0,b.SW:1,b.WDATA_SECURE:0,
                     b.WDATA_PLM:0xffffffff,b.CTRL_PLM:0xffffffff,0:0x170000a1}
         self.writes = []
@@ -291,6 +291,18 @@ class BurnerTests(unittest.TestCase):
     def test_preflight_never_asks_for_confirmation(self):
         b.run(self.context,self.io,self.journal,execute=False)
         self.confirm.assert_not_called()
+
+    def test_live_iff_boundary_change_stops_before_any_row_command(self):
+        self.io.reg[b.IFF_RECORD]=(507<<16)|331
+        with self.assertRaisesRegex(ValueError,'Live IFF_RECORD'):
+            self.run_burn()
+        self.assertEqual(self.io.writes,[])
+
+    def test_iff_boundary_change_after_staging_stops_program_command(self):
+        self.io.after_stage=lambda:self.io.reg.__setitem__(b.IFF_RECORD,(507<<16)|331)
+        with self.assertRaisesRegex(ValueError,'Live IFF_RECORD'):
+            self.run_burn()
+        self.assertFalse(self.io.programs)
 
     def test_existing_live_journal_blocks_device_open(self):
         with tempfile.TemporaryDirectory() as temp:

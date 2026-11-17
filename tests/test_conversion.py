@@ -13,7 +13,8 @@ class ConversionTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name)/'capture.json'
-        blocks, opts = {}, {'NV_FUSE_CRC_STATUS': 0x55, 'NV_FUSE_OPT_DISABLE_GEN3_SPEED': 1}
+        blocks, opts = {}, {'NV_FUSE_CRC_STATUS': 0x55, 'NV_FUSE_OPT_DISABLE_GEN3_SPEED': 1,
+                           'NV_FUSE_IFF_RECORD': (507 << 16) | 488}
         for field, (_, _, width, _) in p.FIELDS.items():
             value = 0x20c2 if field in ('PCIE_DEVIDA', 'PCIE_DEVIDB') else (1 << width)-1
             p.edit_field(blocks, field, value)
@@ -21,6 +22,7 @@ class ConversionTests(unittest.TestCase):
         for field in p.DEFECT_REGISTERS:
             opts[p.defect_name(field)] = 5 if field == 'NVLINK_DISABLE' else 0
         blocks[1, 23] = 0x0fef
+        opts['NV_FUSE_OPT_SYS_PIPE_DISABLE'] = 0xfe
         blocks[2, 37] |= 1  # Preserve bit0 outside DEVIDA.
         blocks[2, 39] = 0x0782
         blocks[2, 46], blocks[2, 47] = 0xa000, 0x0059
@@ -31,9 +33,11 @@ class ConversionTests(unittest.TestCase):
         rows[488] = 0x20
         self.capture = {'bdf': '0000:01:00.0', 'pci_device': '0x20c2',
                         'options': [opts.copy(), opts.copy()], 'raw_rows': [rows[:], rows[:]]}
-    def plan(self, features):
+    def plan(self, features, route=None, proof_rows=0):
         self.path.write_text(json.dumps(self.capture))
-        return p.make_plan(self.path, features)
+        if route is None:
+            route = 'empirical' if 'pcie-gen4-completion' in features else 'a100' if 'a100-device-id' in features else 'cmp'
+        return p.make_plan(self.path, features, route=route, proof_rows=proof_rows)
     def test_completion_combines_bit25_and_preserves_other_bits(self):
         plan = self.plan(['pcie-gen4-bit25', 'pcie-gen4-completion'])
         records = {r['block']: r for r in plan['records']}
