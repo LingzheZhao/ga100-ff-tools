@@ -297,7 +297,7 @@ class ToolTests(unittest.TestCase):
         self.assertEqual(evidence['first_iff_row'],488)
         self.assertEqual(evidence['first_iff_word'],1<<5)
         self.assertEqual(evidence['remaining_blank_rows_after_plan'],
-                         evidence['observed_trailing_blank_rows']-len(plan['records']))
+                         evidence['observed_trailing_blank_rows']-4-len(plan['records']))
         self.assertTrue(evidence['iff_register_checked'])
         self.assertFalse(evidence['eight_zero_rule_assumed'])
         self.assertEqual(evidence['software_reserved_rows'],16)

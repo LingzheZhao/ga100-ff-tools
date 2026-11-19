@@ -123,7 +123,10 @@ captured-row fingerprints bind plans to the selected evidence; BDF alone is not
 treated as card identity. Missing defect values remain unknown, never zero.
 Provided chain summaries and blank-row lists are not trusted: the planner
 reconstructs records from observed words, terminates FF interpretation at the
-first IFF marker and allocates after the latest occupied FF row. It preserves
+first IFF marker and leaves four observed blank buffer rows after the latest
+occupied FF row before allocating new records. For example, if row303 is the
+last occupied row, rows304–307 stay blank and the first planned record is row308.
+This is a software allocation policy, not a verified hardware requirement. It preserves
 unrelated block bits and retains reported defective units.
 
 `field_edits` explains proposed mask changes; `records` contains experimental
@@ -299,11 +302,15 @@ Manually inspect the boundary before any hardware operation; agents must never b
 ## Proof, restoration and checkpoint previews
 
 `space_budget` counts functional records, one reserved restoration row per changed
-block, the requested `--proof-rows N` (default zero), and 16 additional spare rows.
+block, the requested `--proof-rows N` (default zero), four leading buffer rows,
+and 16 additional spare rows. `append_buffer_rows` reports the fixed buffer count.
 Insufficient total capacity rejects a complete plan. `remaining_blank_rows_after_plan`
-is the physical space after functional records; the stricter
-`remaining_after_all_reservations` subtracts restoration, proof and spare budgets.
-These reservations do not allocate, occupy or program rows.
+is the trailing space after functional records (excluding the skipped buffer); the stricter
+`remaining_after_all_reservations` subtracts the buffer, functional, restoration, proof and spare budgets from
+the originally observed trailing blank capacity.
+The four buffer rows remain blank; they are never emitted as records or zero-word
+burns. Other reservations also do not occupy or program rows. Regenerate existing
+plans and use their new plan IDs; old plans fail exact regeneration checks.
 
 `proof_preview` records the requested budget and, for complete evidence, lists
 unallocated no-op encoding candidates from declared blocks untouched by the

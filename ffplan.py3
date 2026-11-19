@@ -20,6 +20,7 @@ CORE_SOURCE = 'https://github.com/kate-land/ga100vfi/blob/main/gpu0-registers/cr
 FF_TYPE_BIT = 5
 IFF_TYPE_MASK = 1 << FF_TYPE_BIT
 FF_CHAIN_MASK = IFF_TYPE_MASK - 1
+APPEND_BUFFER_ROWS = 4  # Leave observed blank rows before the first new record.
 SPARE_FF_ROWS = 16  # Software policy; not a verified hardware minimum.
 IFF_RECORD_OFFSET = 0x820050
 ROUTES = ('cmp', 'a100', 'empirical')
@@ -707,22 +708,22 @@ def make_plan(baseline, groups, repeat=None, defects=None, route='cmp', proof_ro
                 if get_field(new, field) != target:
                     missing.append('compute dependency '+field+' must reach its captured defect mask; include memory with compute')
     records = []
-    space_budget = {'functional_rows': 0, 'proof_rows_reserved': proof_rows,
+    space_budget = {'append_buffer_rows': APPEND_BUFFER_ROWS, 'functional_rows': 0, 'proof_rows_reserved': proof_rows,
                     'restore_rows_reserved': 0, 'software_reserved_rows': SPARE_FF_ROWS,
                     'observed_trailing_blank_rows': boundary-start if boundary is not None else None,
                     'required_rows': None, 'remaining_after_all_reservations': None}
     if not missing:
         changed = [(key, data) for key, data in sorted(new.items()) if data != old.get(key, 0)]
         # Reserve 16 rows as a software planning policy, not a hardware specification.
-        required = 2*len(changed) + proof_rows + SPARE_FF_ROWS
+        required = APPEND_BUFFER_ROWS + 2*len(changed) + proof_rows + SPARE_FF_ROWS
         space_budget.update(functional_rows=len(changed), restore_rows_reserved=len(changed),
                             required_rows=required,
                             remaining_after_all_reservations=boundary-start-required)
         require(start+required <= boundary,
-                'Insufficient observed trailing FF space for functional, proof, restore and spare reservations')
+                'Insufficient observed trailing FF space for buffer, functional, proof, restore and spare reservations')
         for i, ((chain, block), data) in enumerate(changed):
             require((chain, block) in old, 'Touched block has no explicit original record; default bits are unverified')
-            row = start+i
+            row = start+APPEND_BUFFER_ROWS+i
             require(rows[row] == 0, 'Proposed append row is occupied')
             records.append({'row': row, 'chain': chain, 'block': block,
                             'old_block': old[chain, block], 'new_block': data,
@@ -765,7 +766,9 @@ def make_plan(baseline, groups, repeat=None, defects=None, route='cmp', proof_ro
         'iff_boundary': boundary,
         'ff_boundary_evidence': {**boundary_evidence,
             'observed_trailing_blank_rows': boundary-start if boundary is not None else None,
-            'remaining_blank_rows_after_plan': boundary-start-len(records) if boundary is not None else None,
+            'append_buffer_rows': APPEND_BUFFER_ROWS,
+            'first_planned_row': records[0]['row'] if records else None,
+            'remaining_blank_rows_after_plan': (boundary-records[-1]['row']-1 if records else boundary-start) if boundary is not None else None,
             'software_reserved_rows': SPARE_FF_ROWS},
         'physical_defect_aliases_verified': False,
         'programming_eligibility_established': False,
@@ -784,6 +787,12 @@ def make_plan(baseline, groups, repeat=None, defects=None, route='cmp', proof_ro
 
 def validate_records(records, rows, start, boundary, allow_gen3_pair=False):
     seen = set()
+    if records:
+        require(start is not None and boundary is not None and
+                start+APPEND_BUFFER_ROWS < boundary, 'Insufficient append buffer space')
+        require(rows is not None and all(rows.get(row) == 0
+                for row in range(start, start+APPEND_BUFFER_ROWS)),
+                'Append buffer rows were not observed blank')
     for record in records:
         row, chain, block = record['row'], record['chain'], record['block']
         data, encoded = record['new_block'], record['word']
@@ -793,7 +802,7 @@ def validate_records(records, rows, start, boundary, allow_gen3_pair=False):
                 and type(data) is int and 0 <= data < 65536, 'Invalid FF record fields')
         require(encoded == (data << 16) | (block << 6) | chain, 'FF encoding does not match its fields')
         require(type(row) is int and start is not None and boundary is not None
-                and start <= row < boundary and row not in seen, 'Invalid or duplicate append row')
+                and start+APPEND_BUFFER_ROWS <= row < boundary and row not in seen, 'Invalid or duplicate append row')
         require(rows is not None and rows.get(row) == 0, 'Append row was not observed blank')
         if chain == 2 and block == 39:
             require(allow_gen3_pair, 'Gen3 block 39 requires explicit pcie-gen3-pair selection')

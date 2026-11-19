@@ -207,18 +207,20 @@ def audit(tools, plans, dumps, card_names=None):
         after_rows = rows[:]
         for record in plan['records']:
             row, chain, block, data, encoded = (record[k] for k in ('row','chain','block','new_block','word'))
-            require(start <= row < boundary and rows[row] == 0 and row not in used, card+': invalid append row')
+            require(start+4 <= row < boundary and rows[row] == 0 and row not in used, card+': invalid append row')
             require(encoded == (data << 16) | (block << 6) | chain and not encoded & IFF_TYPE_MASK, card+': encoding mismatch')
             require(record['old_block'] == before[chain,block], card+': original block mismatch')
             require((chain,block) not in got, card+': duplicate block')
             got[chain,block] = data;used.add(row);after_rows[row] = encoded
         require(got == expected_changes, card+': final blocks differ from independent policy')
-        require(sorted(used) == list(range(start, start+len(got))), card+': unexpected allocation')
+        require(sorted(used) == list(range(start+4, start+4+len(got))), card+': unexpected allocation')
         budget = plan['space_budget']
         proofs = budget['proof_rows_reserved']
         require(type(proofs) is int and 0 <= proofs <= 512, card+': proof reservation mismatch')
         require(budget['functional_rows'] == len(got) and budget['restore_rows_reserved'] == len(got)
-                and budget['required_rows'] == 2*len(got)+proofs+16
+                and budget['append_buffer_rows'] == 4
+                and all(rows[row] == 0 for row in range(start, start+4))
+                and budget['required_rows'] == 4+2*len(got)+proofs+16
                 and boundary-start >= budget['required_rows'], card+': reserve mismatch')
         replayed, _, replay_boundary = decode(after_rows)
         require(all(replayed.get(k, 0) == desired.get(k, 0) for k in set(replayed) | set(desired))

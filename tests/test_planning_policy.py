@@ -175,7 +175,7 @@ class PlanningPolicyTests(unittest.TestCase):
         plan = self.plan(['memory', 'compute'], proof_rows=2)
         count = len(plan['records'])
         budget = plan['space_budget']
-        self.assertEqual(budget['required_rows'], 2*count+2+16)
+        self.assertEqual(budget['required_rows'], 4+2*count+2+16)
         self.assertEqual(budget['restore_rows_reserved'], count)
         self.assertEqual(plan['proof_preview']['rows_reserved'], 2)
         self.assertFalse(plan['proof_preview']['records_generated'])
@@ -183,6 +183,38 @@ class PlanningPolicyTests(unittest.TestCase):
         self.assertEqual(len(plan['restoration_preview']['blocks']), count)
         for record, restoration in zip(plan['records'], plan['restoration_preview']['blocks']):
             self.assertEqual(restoration['original_data'], record['old_block'])
+
+    def test_four_blank_rows_before_first_record_and_replay(self):
+        plan = self.plan(['memory', 'compute'])
+        rows = self.fixture.capture['raw_rows'][0]
+        _, start, boundary = p.decode(rows)
+        self.assertEqual(plan['records'][0]['row'], start+4)
+        self.assertEqual(plan['space_budget']['append_buffer_rows'], 4)
+        self.assertEqual(plan['ff_boundary_evidence']['first_planned_row'], start+4)
+        self.assertEqual(plan['ff_boundary_evidence']['remaining_blank_rows_after_plan'],
+                         boundary-start-4-len(plan['records']))
+        after = dict(enumerate(rows)) if isinstance(rows, list) else dict(rows)
+        for record in plan['records']:
+            after[record['row']] = record['word']
+        self.assertEqual([after[row] for row in range(start, start+4)], [0]*4)
+        p.simulate(self.fixture.path, plan)
+
+    def test_records_in_buffer_rejected_and_old_plan_cannot_replay(self):
+        plan = self.plan(['nvlink'])
+        rows = self.fixture.capture['raw_rows'][0]
+        _, start, boundary = p.decode(rows)
+        rows = dict(enumerate(rows)) if isinstance(rows, list) else rows
+        for row in range(start, start+4):
+            changed = copy.deepcopy(plan)
+            changed['records'][0]['row'] = row
+            with self.assertRaisesRegex(ValueError, 'Invalid or duplicate append row'):
+                p.validate_records(changed['records'], rows, start, boundary)
+            with self.assertRaisesRegex(ValueError, 'regeneration'):
+                p.simulate(self.fixture.path, changed)
+        occupied = dict(rows)
+        occupied[start+2] = 1
+        with self.assertRaisesRegex(ValueError, 'buffer rows were not observed blank'):
+            p.validate_records(plan['records'], occupied, start, boundary)
 
     def test_proof_candidates_are_untouched_unallocated_logical_noops(self):
         plan = self.plan(['memory', 'compute'], proof_rows=2)
@@ -202,7 +234,7 @@ class PlanningPolicyTests(unittest.TestCase):
     def test_tight_pool_accounts_for_restore_and_proof_rows(self):
         rows = self.fixture.capture['raw_rows'][0]
         _, start, _ = p.decode(rows)
-        boundary = start+1+1+16+2  # One functional, one restore, two proofs, sixteen spare.
+        boundary = start+4+1+1+16+2  # Four buffer, one functional, one restore, two proofs, sixteen spare.
         for values in self.fixture.capture['raw_rows']:
             values[boundary] = 0x20
         self.change_option('NV_FUSE_IFF_RECORD', ((boundary+8) << 16) | boundary)

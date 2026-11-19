@@ -75,7 +75,11 @@ class BurnerTests(unittest.TestCase):
         self.assertEqual(b.CMD_MASK, 3)
 
     def test_full_conversion_plan_programs_once_and_verifies(self):
+        _, start, _ = fixtures.p.decode(self.context['rows'])
         result = self.run_burn()
+        self.assertEqual(self.io.programs[0][0], start+4)
+        self.assertEqual(self.io.rows[start:start+4], [0]*4)
+        self.assertFalse(set(range(start, start+4)) & {row for row, _ in self.io.programs})
         self.assertEqual(len(self.io.programs),len(self.plan['records']))
         self.assertEqual(len(set(row for row,_ in self.io.programs)),len(self.io.programs))
         self.assertTrue(result['full_array_verified'])

@@ -41,7 +41,10 @@ route and proof/restore space budget.
 Existing full-conversion plans are consumed directly; no schema translation or
 re-encoding is needed. Regenerate with this package's planner when an older
 manifest fails exact regeneration. One combined plan gives one row allocation;
-do not stack overlapping plans.
+do not stack overlapping plans. The planner leaves four blank buffer rows before
+the first new record. The burner follows those planned addresses and verifies
+that the buffer remains unchanged in its full-array comparison. Regenerate older
+plans; their previous row allocation and plan IDs are no longer accepted.
 
 ## Live preflight
 
