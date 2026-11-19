@@ -22,6 +22,8 @@ reference-source validator is also included; it uses the adjacent primary script
 
 - `capture.py3`: Linux option/status capture, with optional physical-row reads.
 - `ffplan.py3`: offline per-card planning and logical FF replay simulation.
+- `ffarm.py3`: explicit human-operated volatile arming after glitching; offline
+  description by default. See [ARMING.md](ARMING.md).
 - `ffburn.py3`: optional public-plan burner; offline review by default, explicit
   Linux programming opt-in. Requires the adjacent planner and three interactive confirmations before programming;
   see [BURNER.md](BURNER.md).

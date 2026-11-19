@@ -76,3 +76,15 @@ in Kate's published table; its functional scope remains uncertain. Proof,
 restoration and checkpoint outputs are software planning aids, not validated
 hardware procedures. No claim of ECC's absent FF backing is inferred from a
 failed whole-block comparison.
+
+## Volatile arming
+
+`ffarm.py3` implements the control-fuse re-sense and shadow-override sequence
+reported in Kate Land's linked article, “Goldilock’s glitch” section (checked
+2026-11-19). EFP can initially be zero; SENSE_CTRL restores it while DSOV is
+reported to remain zero. Software override then permits clearing SBFE and
+WDATA_WR_SECURE. These empirical results are checked at runtime, not assumed
+to hold on every card. The helper reuses the burner's device validation, locking,
+read validation and durable journal, with a separate exact-write allowlist.
+It never uses the programming adapter or invokes the burner's programming flow.
+Only synthetic I/O tests have been run for this helper.

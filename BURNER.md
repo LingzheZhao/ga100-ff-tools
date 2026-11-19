@@ -53,9 +53,15 @@ match the plan. The full physical array must match the baseline exactly, not
 merely the BDF or a few option words.
 
 The programming window and any required external supply must already be
-established and maintained by the operator's qualified setup. This package does
+established and maintained by the operator's qualified setup. The burner does
 not control a Pico, reset, voltage, GPIO, rail timing, ROM, SW override or PLMs.
 It checks the resulting registers rather than attempting to open them.
+
+For EFP=0 after a successful glitch, the separate human-operated
+[arming helper](ARMING.md) can issue SENSE_CTRL and apply the shadow overrides.
+Re-sensing may restore SBFE=1; the helper checks EFP=1/DSOV=0 and clears SBFE
+again before opening WDATA. Arming is never implicit in preflight or programming,
+and does not replace the full baseline and plan checks below.
 
 For faster glitching campaigns, consider
 [dalzyu/pico-ga100vfi](https://github.com/dalzyu/pico-ga100vfi), a separate Pico 2

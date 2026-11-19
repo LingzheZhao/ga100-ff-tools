@@ -7,6 +7,8 @@ plans, and simulate them. Programming is a human-only operation outside this
 agent workflow. A complete plan, successful simulation, or open burn window
 never authorizes an agent to program hardware.**
 
+- Never execute `ffarm.py3 --arm` or its live arming functions against hardware.
+  Offline description and synthetic tests are allowed.
 - Never execute `ffburn.py3`, its live functions, another burn tool, or a custom
   replacement against hardware. Never supply or automate burn confirmations.
 - Never issue `CMD_WRITE` (2) or `CMD_SENSE` (3), write FUSEWDATA, change software
