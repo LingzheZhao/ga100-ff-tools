@@ -32,6 +32,8 @@ itself is outside this repository (see [Glitching](#glitching)).
 | `arm/arm_sense_ctrl.py` | Volatile register | One SENSE_CTRL (FUSECTRL=3): EFP 0->1 with DSOV kept 0; `--clear-sbfe`. |
 | `burn/ff_burn.py` | **Burns one fuse row** | One record per call, dry-run by default, `--confirm` plus typing BURN. |
 | `host/gpu-stack.sh` | No | Turn the NVIDIA driver and gpu-unlock off/on for the next boot. |
+| `bench/bench.cu` | No (CUDA) | Benchmark: memory latency/bandwidth, tensor-core TF32/BF16/INT8, boost clock, PCIe, BAR1/feature report. GPL-2.0-only. |
+| `bench/sm_stress.py` | No (CUDA) | FP32 FMA stress on chosen SM ids, with per-launch SM coverage check. |
 
 Live scripts need Linux, root and the card's PCI memory decode enabled.
 
@@ -231,6 +233,74 @@ still have to be told about 80 GB (local memory range 0x28B) and to train
 Gen4; an unlocker that hard-codes the 8 GB card's values stays at 64 GiB and
 Gen1/2 (see [Observations](#observations)). NVLink also needs the board
 modification, a bridge, a second card and a matching ROM.
+
+### 9. After unlocking: benchmark and stress
+
+Newly enabled SMs and the fifth HBM stack were disabled at the factory for a
+reason on some dies, so prove them before trusting the card. Run this after
+step 8, with the driver loaded and the card's cooling running (start your fan
+control first). In a second terminal, watch for driver errors the whole time:
+
+```sh
+sudo dmesg -wT | grep -i xid      # any Xid (13, 31, 43, 48, 79, ...) = stop and investigate
+nvidia-smi -l 2 --query-gpu=temperature.gpu,power.draw,clocks.sm,clocks.mem --format=csv
+```
+
+The tools need the NVIDIA driver (`libcuda.so.1`); `bench.cu` also needs the
+CUDA toolkit to build. On a host with several GPUs, select the card with
+`CUDA_VISIBLE_DEVICES=<index>` (`sm_stress.py` uses device 0; `nvidia_bench`
+also takes the GPU id as its first argument).
+
+**1. SM count and SM stress** (`bench/sm_stress.py`, Python + hand-written PTX,
+no compiler):
+
+```sh
+python3 bench/sm_stress.py probe            # SM ids that received a block
+python3 bench/sm_stress.py run all 600      # all SMs, 10 minutes
+```
+
+`probe` lists the SM ids that actually run work: compare the count with the
+fuse result from step 7 (2 SMs per enabled TPC; e.g. 128, or 124 with the GPC3/4
+runtime mask). `run` keeps every selected SM busy with dense FFMA and checks on
+every launch that each one got a block; `WARNING ... no block reached` means an
+SM dropped out. Exit 0 = ran to the end; a lost GPU exits 2 with the CUDA error.
+To localise a failure, bisect with `lo`/`hi`, then `q0`..`q3`, then
+`ids:3,7,9`.
+
+**2. Benchmark** (`bench/bench.cu`):
+
+```sh
+nvcc -O3 -o bench/nvidia_bench bench/bench.cu -lnvidia-ml -ldl \
+    -gencode arch=compute_80,code=sm_80
+./bench/nvidia_bench                 # full report; ./bench/nvidia_bench 0 0 --csv for one CSV line
+```
+
+Check the report for: total memory (81920 MiB), DRAM bandwidth (should scale
+with five HBM stacks, not four), the PCIe link (16GT/s x16) and H2D/D2H
+bandwidth, BAR1 size, tensor-core (TF32/BF16/INT8) throughput and the measured
+boost clock. Save a stock-card run first if you can, to compare. The header of
+`bench.cu` has the multi-architecture build line.
+
+**3. Memory test**: [memtest_vulkan](https://github.com/GpuZelenograd/memtest_vulkan)
+(GpuZelenograd; download the Linux x86_64 build from its
+[releases](https://github.com/GpuZelenograd/memtest_vulkan/releases), v0.5.0
+was used; it is not bundled here):
+
+```sh
+tar xf memtest_vulkan-v0.5.0_DesktopLinux_X86_64.tar.xz
+./memtest_vulkan                      # pick the NVIDIA device; let the 5-minute test finish
+```
+
+It must end with `Standard 5-minute test PASSed!` (then Ctrl+C, or leave it for a
+longer soak). Any error line, a size well under 80 GB, or an Xid is a fail. On
+one unlocked card it tested 75 GB per pass at about 1000 GB/s write / 600 GB/s
+check and passed 1329 iterations.
+
+All three passing (no Xid, full SM coverage, memtest PASS) is the bar for
+calling a card unlocked. A die that fails on one SM or memory partition is
+not repaired by these tools: disabling a unit again needs a new FF record
+(a human decision, planned from a fresh dump), and every record uses a
+fuse row for good.
 
 ## Plan file format
 

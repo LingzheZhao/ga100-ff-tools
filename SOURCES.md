@@ -29,5 +29,15 @@ The PCIe values were then confirmed on three further dies with these scripts.
 Per-die rows and defect masks from any source are never reused as targets for
 another card: every card is planned from its own dump.
 
+Benchmarks (`bench/`):
+
+- `bench.cu` is `benchmark/nvidia_bench.cu` from
+  [asm64-hooligan/cmpunlocker](https://github.com/asm64-hooligan/cmpunlocker),
+  GPL-2.0-only; the licence text is in `bench/licenses/GPL-2.0.txt`. Only its
+  header comment was changed (file name).
+- `sm_stress.py` is original.
+- [GpuZelenograd/memtest_vulkan](https://github.com/GpuZelenograd/memtest_vulkan)
+  is linked, not bundled.
+
 [dalzyu/pico-ga100vfi](https://github.com/dalzyu/pico-ga100vfi) is linked as a
 separate glitching toolchain; nothing from it is bundled or invoked.

@@ -11,3 +11,7 @@ __pycache__/
 *.jsonl
 journals/
 runs/
+
+# Benchmark builds and downloaded tools (link, do not commit)
+bench/nvidia_bench
+memtest_vulkan*
