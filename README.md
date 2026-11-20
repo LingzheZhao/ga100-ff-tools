@@ -49,6 +49,11 @@ enabled. Capture requires permission to access its PCI sysfs files, normally roo
 The tool verifies the selected PCI identity and takes an advisory per-device
 lock. Other tools and drivers must stay away from the target during capture.
 
+If `lspci -s <BDF> -vv` reports `Mem-` and its BARs as `[disabled]`, capture is
+blocked. Enabling memory decoding changes PCI configuration and is outside this
+capture workflow; the capture tool does not do it. Stop and have the human
+operator handle that prerequisite outside this workflow before attempting capture.
+
 For a complete planner input:
 
 Each dump records `gpu_uuid` and `gpu_uuid_observation` (source and whether a
@@ -242,6 +247,19 @@ Native versus override SM counts and FMA speed are die/driver dependent;
 reference-die counts such as 124/128 are not universal targets. No ECC fuse or SM_SPEED throttle change is
 planned. ECC, NVLink, memory integrity and working link speed are not proven by
 FF replay. `conversion_findings` embeds these limits in generated plans.
+
+Observed after a memory/compute burn on one 8 GB Hynix card (option shadows at
+FBP 0x840, FBPA/FBIO/ROP_L2 0xC03000, ten active FBPs): the fuses only make the
+fifth HBM stack available. Capacity is set in software by the unlock driver:
+CFG1 0x02779000 with LOCAL_MEMORY_RANGE 0x28B (40 << 31 = 80 GiB) and an 80 GiB
+GSP framebuffer target. Unlockers hard-coding the 8 GB card's 64 GiB range (0x20B)
+stay at 64 GiB. With an 80 GiB range, the NVIDIA registry key `RMForceStaticBar1=1`
+(used for P2P setups) failed GSP initialisation with `GSP_INIT 0x3e` on a 64 GiB
+BAR1, across three driver/unlocker combinations; 64 GiB worked with it. The card
+reached 81920 MiB after the key was removed, but the driver build changed at the
+same time, so the key is the likely, not isolated, cause.
+Unlockers whose GSP exploit depends on a driver's Booter microcode build (for
+example, 610/615) did not work with 620.70.06. These are single-card observations.
 Appending restoration records consumes permanent OTP space; it does not undo
 physical fuse programming. This package does not add a live restore operation.
 
