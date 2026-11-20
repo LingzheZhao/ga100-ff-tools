@@ -1,130 +1,86 @@
-# Agent workflow: capture, plan, simulate — NEVER BURN
+# Agent rules: plan and verify, NEVER BURN
 
 ## Absolute boundary
 
-**NEVER BURN FUSES. Use this repository only to capture observations, generate
-plans, and simulate them. Programming is a human-only operation outside this
-agent workflow. A complete plan, successful simulation, or open burn window
-never authorizes an agent to program hardware.**
+**NEVER BURN FUSES.** Agents may derive plans and verify dumps. Every hardware
+write is a human-only operation. A complete plan, a passing check or an open
+burn window never authorizes an agent to program hardware, even when asked.
 
-- Never execute `ffarm.py3 --arm` or its live arming functions against hardware.
-  Offline description and synthetic tests are allowed.
-- Never execute `ffburn.py3`, its live functions, another burn tool, or a custom
-  replacement against hardware. Never supply or automate burn confirmations.
-- The same applies to `cmp170/`: never run `cmp170/arm/*.py` or
-  `cmp170/burn/ff_burn.py` against hardware. `cmp170/planner/ffcard.py` is
-  offline and allowed; `ff_dump.py`, `read_defects.py` and `pcie_state.py` read
-  live hardware and follow the capture rules below.
-- Never issue `CMD_WRITE` (2) or `CMD_SENSE` (3), write FUSEWDATA, change software
-  override/security/PLM registers, or access the RIR programming macro.
-- Never glitch, reset, retrain, flash, change voltage/GPIO, unbind drivers, or
-  modify PCI configuration as part of this workflow. Do not invoke an external
-  glitching or programming tool.
-- Do not weaken guards, invent missing evidence, default unknown defects to
-  zero, or convert candidate records into automatic programming actions.
-- Synthetic tests with fake I/O are allowed. Never connect tests to real devices.
+- Never run `burn/ff_burn.py` against hardware, with or without `--confirm`,
+  and never type, pipe or automate its BURN confirmation.
+- Never run `arm/sw_override.py`, `arm/open_wdata_plm.py` or
+  `arm/arm_sense_ctrl.py` against hardware (not even `--read-only`: hand the
+  command to the human instead). Never type SENSE for it.
+- Never write or replace a burn tool, and never issue `CMD_WRITE` (2) or
+  `CMD_SENSE` (3), write FUSEWDATA/FUSEADDR, or change software override,
+  security, PLM or SBFE registers by any other means.
+- Never glitch, reset, power-cycle, flash a ROM or InfoROM, change voltage/GPIO,
+  unbind drivers, change PCI configuration or run `host/gpu-stack.sh enable|disable`.
+- Never plan or burn chain 2 blocks 37/38 (PCIe device ID).
+- Never edit a plan's JSON by hand. A wrong or stale plan is regenerated with
+  `planner/ffcard.py derive` from a fresh dump.
+- Do not weaken guards or assertions, invent missing evidence, or treat an
+  unknown defect mask as zero.
 
-## 1. Select evidence and capture
+Allowed: `planner/ffcard.py` (offline), reading JSON the human supplies, and
+tests with synthetic data. The live readers (`planner/ff_dump.py`,
+`planner/read_defects.py`, `planner/pcie_state.py`) are the human's to run unless
+they explicitly ask the agent to; prefer handing over the command and checking
+the pasted output.
 
-Read `README.md`, `SOURCES.md`, and the use-at-your-own-risk warning. Require the
-user's intended card BDF(s); do not choose a target by GPU index or slot guessing.
-Process each card separately and preserve its association with all outputs.
-Record its GPU UUID too. If driver information is unavailable after unbinding,
-use a previously saved BDF/UUID mapping via `--gpu-uuid BDF=GPU-UUID`. Never
-invent a UUID or label a supplied mapping as live-verified.
+## Double verification
 
-Use a normal CMP `20c2` baseline with clean CRC for planning. Before live capture,
-the selected Linux card must already be unbound, PCI memory decoding enabled,
-and BAR0 accessible. Do not establish these conditions yourself. If conditions
-are unmet, report the blocker and use existing captures for independent offline
-work where possible. If running away from the GPU host, use the user's existing
-captures; do not claim that new hardware reads occurred.
+Every plan is verified twice, by two independent methods, before it is handed
+to the human. Every burn result is verified twice afterwards. Report both
+results; if they disagree, or either fails, stop.
 
-Create a fresh output directory for each card/run. The BDF below is a placeholder
-and must be replaced with the selected card. Run steps separately and inspect
-each exit status before continuing:
+### Before burning: the plan
 
-```sh
-CARD_BDF='REPLACE_WITH_SELECTED_BDF'
-mkdir -p runs
-RUN_DIR=$(mktemp -d runs/card.XXXXXXXX)
-sudo python3 capture.py3 --bdf "$CARD_BDF" --raw --output "$RUN_DIR/capture.json"
-```
+1. **Tool check.** `ffcard.py derive` must finish without REFUSED or an
+   assertion, print `OK` for every field and `unchanged` for SYS_PIPE and the
+   device IDs, and show no `SETS` marker.
+2. **Independent check.** Do not trust step 1's output. Recompute from the stock
+   dump and defects JSON yourself, without importing `ffcard.py`:
+   - decode each record: `chain = w & 0x1F`, `bit5 = 0`, `block = (w >> 6) & 0x3FF`,
+     `data = w >> 16`; it must equal the record's `chain`/`block`/`new_data`;
+   - `old_data` must equal that block in the dump's chains;
+   - `old_data ^ new_data` may only touch bits of the target fields
+     (field map in README.md);
+   - replay dump rows + plan records in row order (last record per block wins)
+     and confirm each field equals its defect mask, and SYS_PIPE and DEVIDA/B
+     are unchanged;
+   - rows: the first plan row is the first blank after the last used row
+     (plus `--skip-rows`), rows are consecutive, all inside 222-487 and blank in
+     the dump; no block is (2, 37) or (2, 38).
+3. Confirm the dump belongs to the card the human named, and that each
+   plan's `baseline.fingerprint` matches `ffcard.py fingerprint` of that dump.
+   A plan made for another card, even at the same BDF, must not be used.
 
-`--raw` is the narrow permitted MMIO exception: physical-row address selection
-and `CMD_READ` only, using the existing capture adapter. It reads all 512 rows
-twice, checks state/CRC/debug/address readback, and attempts address restoration.
-Never replace it with direct MMIO or generic register-write commands.
+Hand over the plans with a table of index, row and encoded word, so the human
+can compare each `target:` line before typing BURN.
 
-Check capture success, both matching option snapshots, both matching raw passes,
-clean CRC, absence of read issues, and successful address restoration. Preserve
-failed/partial observations, report them, and do not plan from unreliable data.
-Never overwrite an earlier capture. With existing evidence, use its original
-path as the baseline in the next commands rather than copying or editing it.
+### In the window (human runs, agent checks)
 
-## 2. Generate a per-card plan
+`ffcard.py check` on the fresh window dump must report the baseline rows
+matching and give the next record. Check the pasted output yourself too: rows
+222..last unchanged, plan rows blank or already holding their own record, CRC
+0x55, idle, no read errors. Any STOP: tell the human not to burn.
 
-Default scope is memory, compute, and the experimental Gen3 candidate pair.
-State this scope explicitly. Only add other feature selections when requested;
-review their mapping uncertainty and ROM/hardware dependencies first. Use the
-explicit route: `cmp` by default, `a100` for requested identity conversion, and
-`empirical` only for a requested extra MAGIC_D experiment. SYS_PIPE is opt-in.
-Do not imply that it unlocks ECC or NVDEC.
+### After burning: the result
 
-```sh
-python3 ffplan.py3 plan --baseline "$RUN_DIR/capture.json" \
-  --features memory compute pcie-gen3-pair --output "$RUN_DIR/plan.json"
-```
+1. **Tool check.** `ffcard.py verify` on the post-cold-boot dump and defects
+   must print `VERIFY PASS`; `pcie_state.py` (when the PCIe plan was burned)
+   must exit 0.
+2. **Independent check.** Compare every plan row with the dump's raw word
+   yourself, confirm rows 222..last are unchanged and every row after the last
+   plan row is blank, and compare the shadows (`OPT_*_DISABLE`) and defect
+   masks with the targets.
 
-Use `python3 ffplan.py3 changes` to review available capabilities and their limits.
-Select them using `--changes` (`--features` is an alias). Unsupported entries
-must never generate records. Review `proposed_changes` in both plan and replay
-outputs, including shared row references and per-field targets.
+Report the per-card result, the first blank row, and anything unresolved.
+State clearly that **no fuses were burned by the agent**.
 
-Inspect `status`, `missing_evidence`, `ff_boundary_evidence`, source hashes, `field_edits`,
-`register_effects`, `records`, `dependency_checks`, `space_budget`,
-`cold_boot_checkpoints`, and the IFF boundary. Account for one restoration row
-per changed block, requested proof-row budget, and the software spare margin.
-Proof encodings have no assigned row or selection; proof/restoration previews
-allocate no executable records. Never execute a
-checkpoint or claim it is bootable or cold-boot verified. Require targets to retain
-reported defects and unrelated block bits. Rows must be observed trailing blanks
-before the first observed record with bit5 set (`word & 0x20`). Never assume
-row488 or treat eight zero rows as proof of the boundary. Require the repeated
-IFF_RECORD START/LAST to be valid and START to match the raw bit5 marker. Old
-captures without that register require recapture; do not synthesize the value. Never invent an IFF boundary, repeat pass, identity,
-missing register, fuse location, or defect mask.
+## Data hygiene
 
-Exit 2 means incomplete evidence (or CLI usage error); inspect the diagnostic
-and stop dependent work. Exit 1 means validation/I/O failure. Do not treat either
-as a complete plan. Regenerate stale plans rather than modifying their JSON.
-
-## 3. Simulate and review
-
-Only simulate a complete plan using exactly the same baseline and any `--repeat`
-or `--defects` inputs used during generation. The output directory must be fresh;
-never overwrite an existing simulation result.
-
-```sh
-python3 ffplan.py3 simulate --baseline "$RUN_DIR/capture.json" \
-  --plan "$RUN_DIR/plan.json" > "$RUN_DIR/simulation.json"
-```
-
-Require a zero exit status and valid result JSON. Preserve failures instead of
-hiding them or labeling them successful. Manually inspect every proposed block
-change, preserved bits, append row and encoded 32-bit word against the source
-capture. Simulation verifies logical FF replay only: it does not prove electrical
-programming conditions, cold-boot behavior, memory integrity, working SMs, PCIe
-speed, ECC, NVLink, or an empirical mapping on this card.
-
-## 4. Deliver artifacts and stop
-
-Return the per-card paths to the capture, plan and simulation, selected features,
-record count, proposed row range, validation outcomes, and unresolved findings.
-Clearly state **NO FUSES WERE BURNED**. Do not proceed to programming, even after
-all offline checks pass. Leave manual inspection and all hardware execution to
-the human operator outside this agent workflow.
-
-Keep captures, generated plans, simulations, journals and card identifiers out
-of commits and release ZIPs. `runs/` and generated JSON/log files are ignored.
-Publish only allowlisted source, documentation and synthetic tests.
+Card dumps, defects, plans, window dumps and card identifiers (UUIDs, serials,
+row fingerprints of real cards) stay out of commits. `*.json` is ignored.
+Tests build synthetic data only and never open a device.

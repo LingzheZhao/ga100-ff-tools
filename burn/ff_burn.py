@@ -17,8 +17,8 @@ Guards (all must pass before any write):
 Run on the GPU host:
   sudo python3 ff_burn.py --bdf 0000:01:00.0 --row 293 --value 0x019801C1
       (dry-run; add --confirm to actually burn)
-  sudo python3 ff_burn.py --bdf 0000:01:00.0 --plan ff_plan.json --index 0 --confirm
-      (ff_plan.json = your derived plan from ff_derive.py; not shipped)
+  sudo python3 ff_burn.py --bdf 0000:01:00.0 --plan card_plan_sm_hbm.json --index 0 --confirm
+      (plans come from planner/ffcard.py derive; not shipped)
 """
 import argparse
 import json
