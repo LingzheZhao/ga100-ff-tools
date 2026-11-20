@@ -11,6 +11,10 @@ never authorizes an agent to program hardware.**
   Offline description and synthetic tests are allowed.
 - Never execute `ffburn.py3`, its live functions, another burn tool, or a custom
   replacement against hardware. Never supply or automate burn confirmations.
+- The same applies to `cmp170/`: never run `cmp170/arm/*.py` or
+  `cmp170/burn/ff_burn.py` against hardware. `cmp170/planner/ffcard.py` is
+  offline and allowed; `ff_dump.py`, `read_defects.py` and `pcie_state.py` read
+  live hardware and follow the capture rules below.
 - Never issue `CMD_WRITE` (2) or `CMD_SENSE` (3), write FUSEWDATA, change software
   override/security/PLM registers, or access the RIR programming macro.
 - Never glitch, reset, retrain, flash, change voltage/GPIO, unbind drivers, or

@@ -29,6 +29,9 @@ reference-source validator is also included; it uses the adjacent primary script
   see [BURNER.md](BURNER.md).
 - `validate_reference.py3`: optional independent source/plan audit against a
   separately supplied trusted reference tools.
+- [`cmp170/`](cmp170/README.md): the leaner per-card script set used to unlock
+  three 8 GB CMP 170HX cards (dump, derive/check/verify, arm, one-record burn,
+  PCIe state, driver on/off). Its README walks through the whole workflow.
 
 Public references are documented in [SOURCES.md](SOURCES.md). This directory
 contains no real-card captures, identifiers, calibration profiles, ROMs or
