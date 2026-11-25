@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Read-only GA100 defect-mask read. O_RDONLY + PROT_READ: cannot write the GPU.
 
-  sudo python3 read_defects.py 0000:01:00.0 > defects.json
-Offsets from host_scripts/check.py and cmprir/gpcprobe/gpc_probe.py.
+  sudo python3 planner/read_defects.py 0000:01:00.0 > defects.json
+Checks FUSECTRL, BOOT0, GFW (0x118234), and every read for PRI poison
+(0xBADxxxxx) or dead BAR0 (0xFFFFFFFF) before emitting JSON.
 """
 import json
-import mmap
-import os
-import struct
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.bar0 import Bar0, Bar0Abort, GA100_BOOT0  # noqa: E402
 
 REGS = [
     ("OPT_GPC_DEFECTIVE", 0x8205C4),
@@ -27,18 +29,44 @@ REGS = [
     (0x8205C8, 0x820508, 0x82050C, 0x820514, 0x820564, 0x8205AC, 0x820B84, 0x820B80))
 ] + [("FUSE_CTRL_OPT_TPC_GPC%d" % i, 0x820838 + 4 * i) for i in range(8)]
 
-bdf = sys.argv[1]
-fd = os.open("/sys/bus/pci/devices/%s/resource0" % bdf, os.O_RDONLY | os.O_CLOEXEC)
-m = mmap.mmap(fd, 0x822000, flags=mmap.MAP_SHARED, prot=mmap.PROT_READ)
-boot0 = struct.unpack_from("<I", m, 0)[0]  # PMC_BOOT_0; GA100 = 0x170000A1
-if boot0 == 0xFFFFFFFF:
-    sys.exit("ABORT: BAR0 reads 0xFFFFFFFF (GPU asleep/D3, memory decode off, "
-             "or off the bus). Load the nvidia driver, run nvidia-smi, retry.")
-if boot0 != 0x170000A1:
-    print("WARNING: PMC_BOOT_0=0x%08X, expected 0x170000A1 (GA100)" % boot0,
-          file=sys.stderr)
-regs = [{"name": n, "offset": "0x%06X" % o,
-         "value": "0x%08X" % struct.unpack_from("<I", m, o)[0]} for n, o in REGS]
-m.close()
-os.close(fd)
-print(json.dumps({"bdf": bdf, "registers": regs}, indent=2))
+
+def read_with_bar(bar, bdf):
+    health = bar.check_health_first(require_idle=False, require_gfw=True)
+    if health["boot0"] != GA100_BOOT0:
+        print("WARNING: PMC_BOOT_0=0x%08X, expected 0x%08X (GA100)"
+              % (health["boot0"], GA100_BOOT0), file=sys.stderr)
+    regs = [
+        {"name": n, "offset": "0x%06X" % o, "value": "0x%08X" % bar.rd_checked(o, n)}
+        for n, o in REGS
+    ]
+    return {
+        "bdf": bdf,
+        "boot0": "0x%08X" % health["boot0"],
+        "gfw": "0x%08X" % health["gfw"],
+        "fusectrl": "0x%08X" % health["fusectrl"],
+        "registers": regs,
+    }
+
+
+def main():
+    if len(sys.argv) != 2:
+        sys.exit("usage: sudo python3 planner/read_defects.py <BDF>")
+    bdf = sys.argv[1]
+    try:
+        bar = Bar0(bdf, read_only=True)
+    except Bar0Abort as exc:
+        sys.exit("ABORT: %s (keep nvidia driver unloaded; enable memory decode with "
+                 "`setpci -s %s COMMAND=0x0002:0x0002` if BAR0 reads 0xFFFFFFFF)" % (exc, bdf))
+    try:
+        out = read_with_bar(bar, bdf)
+    except Bar0Abort as exc:
+        sys.exit("ABORT: %s (keep nvidia driver unloaded; enable memory decode with "
+                 "`setpci -s %s COMMAND=0x0002:0x0002` if BAR0 reads 0xFFFFFFFF)" % (exc, bdf))
+    finally:
+        bar.close()
+    print(json.dumps(out, indent=2))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

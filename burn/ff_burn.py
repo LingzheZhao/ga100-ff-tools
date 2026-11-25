@@ -2,113 +2,165 @@
 """Guarded single-record GA100 FF burn (main array). IRREVERSIBLE when confirmed.
 
 Burns ONE fuseless-fuse record into a blank main-array row (222-487) using
-CMD_WRITE, then reads it back to verify. DRY-RUN by default; nothing is written
+CMD_WRITE, then reads it back to verify. DRY-RUN by default; nothing is burned
 unless --confirm is passed AND you type BURN at the prompt.
 
-Protocol (main array, DEBUGCTRL.RWL=0; RWL=1 is the separate RIR macro):
-  FUSECTRL=0 -> FUSEADDR=row -> FUSEWDATA=value -> FUSECTRL=CMD_WRITE(2)
-  -> poll IDLE -> CMD_READ row -> verify.
-
-Guards (all must pass before any write):
-  FUSECTRL IDLE, CRC=0x55, DSOV=0, SBFE=0, EFP=1,
-  FUSEWDATA_PLM=0xFFFFFFFF, FUSECTRL_PLM=0xFFFFFFFF, DEBUGCTRL.RWL=0,
-  target row reads blank (0x00000000). Aborts on any failure; NO retry.
+Hardened safety guarantees:
+  - Single aligned 32-bit BAR0 writes (memoryview cast, never struct.pack_into).
+  - Strictly validates target row (222-487), 32-bit non-zero value, IFF bit=0,
+    and forbids chain 2 blocks 37/38 (PCIe device ID).
+  - Fail-fast prerequisites BEFORE issuing any CMD_READ: checks FUSECTRL IDLE,
+    BOOT0, GFW_BOOT (0x118234 low byte == 0xFF), CRC=0x55, DSOV=0,
+    EN_SW_OVERRIDE=1, SBFE=0, EFP=1, WDATA_WR_SECURE=0, FUSEWDATA_PLM,
+    FUSECTRL_PLM, DEBUGCTRL.RWL=0. Only after ALL register guards pass does it
+    issue CMD_READ on die-ID rows (when bound in plan) and the target row.
+  - Zero extra register reads and zero retries on poison/timeout/mismatch.
 
 Run on the GPU host:
-  sudo python3 ff_burn.py --bdf 0000:01:00.0 --row 293 --value 0x019801C1
-      (dry-run; add --confirm to actually burn)
-  sudo python3 ff_burn.py --bdf 0000:01:00.0 --plan card_plan_sm_hbm.json --index 0 --confirm
-      (plans come from planner/ffcard.py derive; not shipped)
+  sudo python3 burn/ff_burn.py --bdf 0000:01:00.0 --plan card_plan_sm_hbm.json --index 0
+  sudo python3 burn/ff_burn.py --bdf 0000:01:00.0 --plan card_plan_sm_hbm.json --index 0 --confirm
 """
 import argparse
 import json
-import mmap
 import os
-import struct
 import sys
-import time
+from pathlib import Path
 
-FUSECTRL = 0x00820000
-FUSEADDR = 0x00820004
-FUSERDATA = 0x00820008
-FUSEWDATA = 0x0082000C
-DEBUGCTRL = 0x00820060
-RWL_BIT = 1 << 1
-CRC_STATUS = 0x00820070
-EFP = 0x00820078
-DSOV = 0x00820084
-FUSEWDATA_PLM = 0x008200F4
-FUSECTRL_PLM = 0x008200F8
-SBFE = 0x00821108
-CMD_READ = 0x1
-CMD_WRITE = 0x2
-STATE_MASK = 0x1F << 16
-STATE_IDLE = 4 << 16
-MAP_BYTES = 0x822000
-FF_START, FF_END = 222, 487
-
-
-class Bar0:
-    def __init__(self, bdf):
-        self.fd = os.open("/sys/bus/pci/devices/%s/resource0" % bdf,
-                          os.O_RDWR | os.O_SYNC | os.O_CLOEXEC)
-        try:
-            self.mm = mmap.mmap(self.fd, MAP_BYTES, flags=mmap.MAP_SHARED,
-                                prot=mmap.PROT_READ | mmap.PROT_WRITE)
-        except BaseException:
-            os.close(self.fd)
-            raise
-
-    def rd(self, o):
-        return struct.unpack_from("<I", self.mm, o)[0]
-
-    def wr(self, o, v):
-        struct.pack_into("<I", self.mm, o, v & 0xFFFFFFFF)
-
-    def close(self):
-        self.mm.close()
-        os.close(self.fd)
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from common.bar0 import (  # noqa: E402
+    Bar0,
+    Bar0Abort,
+    CMD_IDLE,
+    CMD_WRITE,
+    CRC_STATUS,
+    DEBUGCTRL,
+    DSOV,
+    EFP,
+    EN_SW_OVERRIDE,
+    FF_END,
+    FF_START,
+    FORBIDDEN_BLOCKS,
+    FUSEADDR,
+    FUSECTRL,
+    FUSECTRL_PLM,
+    FUSEWDATA,
+    FUSEWDATA_PLM,
+    GFW_BOOT,
+    RWL_BIT,
+    SBFE,
+    WDATA_WR_SECURE,
+    gfw_ready,
+    is_idle,
+)
 
 
-def poll_idle(bar, ms):
-    end = time.monotonic() + ms / 1000.0
-    while time.monotonic() < end:
-        if (bar.rd(FUSECTRL) & STATE_MASK) == STATE_IDLE:
-            return True
-        time.sleep(0.001)
-    return False
+def validate_target(row, value, rec=None):
+    """Validate target row and 32-bit encoded FF word before touching hardware."""
+    if not isinstance(row, int) or not (FF_START <= row <= FF_END):
+        raise ValueError("row %r outside FF region %d-%d" % (row, FF_START, FF_END))
+    if not isinstance(value, int) or value <= 0 or value > 0xFFFFFFFF:
+        raise ValueError("value %r must be a non-zero 32-bit integer" % (value,))
+    if value & 0x20:
+        raise ValueError("value 0x%08X has IFF bit (bit 5) set — REFUSED" % value)
+    chain = value & 0x1F
+    block = (value >> 6) & 0x3FF
+    if (chain, block) in FORBIDDEN_BLOCKS:
+        raise ValueError("value 0x%08X targets forbidden device-ID block (%d, %d) — REFUSED"
+                         % (value, chain, block))
+    if rec is not None:
+        r_chain = rec["chain"]
+        r_block = rec["block"]
+        r_new = int(rec["new_data"], 16)
+        expected = (r_new << 16) | (r_block << 6) | r_chain
+        if expected != value:
+            raise ValueError("plan record encoded 0x%08X != recomputed 0x%08X" % (value, expected))
+    return chain, block
 
 
-def read_row(bar, row):
-    bar.wr(FUSECTRL, 0)
-    bar.wr(FUSEADDR, row)
-    bar.wr(FUSECTRL, CMD_READ)
-    if not poll_idle(bar, 1000):
-        return None
-    return bar.rd(FUSERDATA)
-
-
-def check_prereqs(bar, row):
+def check_prereqs(bar, row, expected_die_id_hash=None):
+    """Fail-fast prerequisite check; NEVER issues CMD_READ until every register guard passes."""
     checks = []
-    fc = bar.rd(FUSECTRL)
-    checks.append(("FUSECTRL IDLE", (fc & STATE_MASK) == STATE_IDLE, "0x%08X" % fc))
-    crc = bar.rd(CRC_STATUS)
-    checks.append(("CRC_STATUS=0x55", crc == 0x55, "0x%02X" % crc))
-    dsov = bar.rd(DSOV)
-    checks.append(("DSOV=0", dsov == 0, "0x%X" % dsov))
-    sbfe = bar.rd(SBFE)
-    checks.append(("SBFE=0", sbfe == 0, "0x%X" % sbfe))
-    efp = bar.rd(EFP)
-    checks.append(("EFP=1", efp == 1, "0x%X" % efp))
-    wplm = bar.rd(FUSEWDATA_PLM)
-    checks.append(("FUSEWDATA_PLM open", wplm == 0xFFFFFFFF, "0x%08X" % wplm))
-    cplm = bar.rd(FUSECTRL_PLM)
-    checks.append(("FUSECTRL_PLM open", cplm == 0xFFFFFFFF, "0x%08X" % cplm))
-    dbg = bar.rd(DEBUGCTRL)
-    checks.append(("DEBUGCTRL.RWL=0 (main array)", (dbg & RWL_BIT) == 0, "0x%08X" % dbg))
-    blank = read_row(bar, row)
-    checks.append(("target row blank", blank == 0, "0x%08X" % (blank if blank is not None else 0xFFFFFFFF)))
-    return checks
+    health = bar.check_health_first(require_idle=True, require_gfw=True)
+    checks.append(("FUSECTRL IDLE", True, "0x%08X" % health["fusectrl"]))
+    checks.append(("BOOT0 valid", True, "0x%08X" % health["boot0"]))
+    checks.append(("GFW_BOOT low byte 0xFF", gfw_ready(health["gfw"]), "0x%08X" % health["gfw"]))
+
+    reg_guards = [
+        ("CRC_STATUS=0x55", CRC_STATUS, lambda v: v == 0x55, "0x%02X", False),
+        ("DSOV=0", DSOV, lambda v: v == 0, "0x%X", False),
+        ("EN_SW_OVERRIDE=1", EN_SW_OVERRIDE, lambda v: (v & 1) == 1, "0x%X", False),
+        ("SBFE=0", SBFE, lambda v: v == 0, "0x%X", False),
+        ("EFP=1", EFP, lambda v: v == 1, "0x%X", False),
+        ("WDATA_WR_SECURE=0", WDATA_WR_SECURE, lambda v: v == 0, "0x%08X", False),
+        ("FUSEWDATA_PLM open", FUSEWDATA_PLM, lambda v: v == 0xFFFFFFFF, "0x%08X", True),
+        ("FUSECTRL_PLM open", FUSECTRL_PLM, lambda v: v == 0xFFFFFFFF, "0x%08X", True),
+        ("DEBUGCTRL.RWL=0 (main array)", DEBUGCTRL, lambda v: (v & RWL_BIT) == 0, "0x%08X", False),
+    ]
+    for name, off, pred, fmt, allow_ones in reg_guards:
+        val = bar.rd_checked(off, name, allow_all_ones=allow_ones)
+        ok = pred(val)
+        checks.append((name, ok, fmt % val))
+        if not ok:
+            # Fail-fast: do NOT read further registers or issue CMD_READ!
+            return checks, False
+
+    if expected_die_id_hash is not None:
+        _, live_hash = bar.read_die_id()
+        ok = (live_hash == expected_die_id_hash)
+        checks.append(("die-ID (rows 8-15) match", ok, "%s (want %s)" % (live_hash, expected_die_id_hash)))
+        if not ok:
+            return checks, False
+
+    cur = bar.read_row(row)
+    ok = (cur == 0)
+    checks.append(("target row blank", ok, "0x%08X" % cur))
+    return checks, ok
+
+
+def execute(bar, row, value, confirm=False, expected_die_id_hash=None, input_fn=input):
+    print("=== FF burn %s ===" % ("CONFIRMED" if confirm else "DRY-RUN"))
+    print("target: row %d = 0x%08X" % (row, value))
+    checks, all_ok = check_prereqs(bar, row, expected_die_id_hash=expected_die_id_hash)
+    for name, ok, val in checks:
+        print("  [%s] %-32s %s" % ("OK" if ok else "FAIL", name, val))
+    if not all_ok:
+        print("\nABORT: prerequisites not met. Stopped immediately; no write performed.")
+        return 1
+    if not confirm:
+        print("\nDRY-RUN: all checks passed (note: CMD_READ was used to verify blank row).")
+        print("Would burn row %d = 0x%08X. Re-run with --confirm to execute (IRREVERSIBLE)."
+              % (row, value))
+        return 0
+
+    print("\n*** IRREVERSIBLE FUSE BURN ***")
+    try:
+        resp = input_fn("Type BURN to write row %d = 0x%08X: " % (row, value))
+    except EOFError:
+        resp = ""
+    if resp.strip() != "BURN":
+        print("ABORT: not confirmed. No write performed.")
+        return 1
+
+    # Re-confirm controller is still IDLE immediately before CMD_WRITE.
+    fc = bar.rd_checked(FUSECTRL, "FUSECTRL")
+    if not is_idle(fc):
+        print("ABORT: FUSECTRL no longer IDLE (0x%08X). No write performed." % fc)
+        return 1
+
+    bar.wr(FUSECTRL, CMD_IDLE)
+    bar.wr(FUSEADDR, row)
+    bar.wr(FUSEWDATA, value)
+    bar.wr(FUSECTRL, CMD_WRITE)
+    # Fail-fast: timeout or poison raises Bar0Abort with ZERO extra reads.
+    bar.poll_idle(5000)
+
+    readback = bar.read_row(row)
+    if readback == value:
+        print("VERIFY OK: row %d = 0x%08X" % (row, readback))
+        print("Burn landed. For a no-op test, effective config is unchanged.")
+        return 0
+    print("VERIFY FAIL: expected 0x%08X, got 0x%08X. STOP. Do NOT retry." % (value, readback))
+    return 1
 
 
 def main():
@@ -121,69 +173,43 @@ def main():
     ap.add_argument("--confirm", action="store_true", help="actually burn (else dry-run)")
     args = ap.parse_args()
     if sys.platform != "linux":
-        print(json.dumps({"error": "Requires Linux"})); return 2
+        print(json.dumps({"error": "Requires Linux"}))
+        return 2
     if os.geteuid() != 0:
-        print(json.dumps({"error": "Run with sudo"})); return 2
+        print(json.dumps({"error": "Run with sudo"}))
+        return 2
 
+    rec = None
+    expected_die_id_hash = None
     if args.plan:
-        with open(args.plan, encoding="ascii") as f:
+        with open(args.plan, encoding="utf-8") as f:
             plan = json.load(f)
         rec = plan["records"][args.index]
         row = rec["row"]
         value = int(rec["encoded"], 16)
+        expected_die_id_hash = (plan.get("baseline") or {}).get("die_id_hash")
     else:
         if args.row is None or args.value is None:
-            print("need --row and --value, or --plan"); return 2
+            print("need --row and --value, or --plan")
+            return 2
         row, value = args.row, args.value
 
-    if not (FF_START <= row <= FF_END):
-        print("ABORT: row %d outside FF region %d-%d" % (row, FF_START, FF_END)); return 2
-
-    bar = Bar0(args.bdf)
     try:
-        print("=== FF burn %s ===" % ("CONFIRMED" if args.confirm else "DRY-RUN"))
-        print("target: row %d = 0x%08X" % (row, value))
-        checks = check_prereqs(bar, row)
-        all_ok = True
-        for name, ok, val in checks:
-            print("  [%s] %-32s %s" % ("OK" if ok else "FAIL", name, val))
-            all_ok = all_ok and ok
-        if not all_ok:
-            print("\nABORT: prerequisites not met. No write performed.")
-            return 1
-        if not args.confirm:
-            print("\nDRY-RUN: all checks passed. Would burn row %d = 0x%08X." % (row, value))
-            print("Re-run with --confirm to execute (IRREVERSIBLE).")
-            return 0
+        validate_target(row, value, rec=rec)
+    except (ValueError, KeyError) as exc:
+        print("ABORT: %s" % exc)
+        return 2
 
-        print("\n*** IRREVERSIBLE FUSE BURN ***")
-        try:
-            resp = input("Type BURN to write row %d = 0x%08X: " % (row, value))
-        except EOFError:
-            resp = ""
-        if resp.strip() != "BURN":
-            print("ABORT: not confirmed. No write performed.")
-            return 1
-
-        # ensure RWL clear (main array), preserve other DEBUGCTRL bits
-        dbg = bar.rd(DEBUGCTRL)
-        if dbg & RWL_BIT:
-            bar.wr(DEBUGCTRL, dbg & ~RWL_BIT)
-        bar.wr(FUSECTRL, 0)
-        bar.wr(FUSEADDR, row)
-        bar.wr(FUSEWDATA, value)
-        bar.wr(FUSECTRL, CMD_WRITE)
-        if not poll_idle(bar, 5000):
-            print("ERROR: write did not complete (FUSECTRL=0x%08X). STOP. No retry."
-                  % bar.rd(FUSECTRL))
-            return 1
-        readback = read_row(bar, row)
-        if readback == value:
-            print("VERIFY OK: row %d = 0x%08X" % (row, readback))
-            print("Burn landed. For a no-op test, effective config is unchanged.")
-            return 0
-        print("VERIFY FAIL: expected 0x%08X, got 0x%08X. STOP. Do NOT retry."
-              % (value, readback if readback is not None else 0xFFFFFFFF))
+    try:
+        bar = Bar0(args.bdf, read_only=False)
+    except Bar0Abort as exc:
+        print("STOP: %s" % exc)
+        return 1
+    try:
+        return execute(bar, row, value, confirm=args.confirm,
+                       expected_die_id_hash=expected_die_id_hash)
+    except Bar0Abort as exc:
+        print("STOP: %s. Do NOT retry; save this output." % exc)
         return 1
     finally:
         bar.close()

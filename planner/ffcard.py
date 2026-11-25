@@ -4,21 +4,18 @@
 Works only on JSON written by ff_dump.py and read_defects.py. Opens no device,
 writes no register and burns nothing; ff_burn.py stays the only write path.
 
-  derive       --card NAME --dump DUMP --defects DEFECTS --out-dir DIR
-               Writes NAME_plan_{0_noop,sm_hbm,pcie,nvlink}.json, rows assigned
-               in burn order from the first blank row after the last record.
-  check        --dump WINDOW_DUMP PLAN...
-               In the burn window, before ff_burn.py: the baseline rows are
-               unchanged and every plan row is blank or already holds its
-               record. Prints the next record to burn (resumes after a lost window).
-  verify       --dump FINAL_DUMP [--defects FINAL_DEFECTS] PLAN...
-               After the cold boot: every record burned, nothing else written,
-               and the option fields, shadows and defect masks at their targets.
-  fingerprint  --dump DUMP
-               Hash of the occupied rows, for checks without the baseline file.
+Hardened validation guarantees:
+  - Requires controller_idle is True and crc_status == "0x55" in derive, check,
+    and verify (missing or null controller_idle is REFUSED, never treated as OK).
+  - Requires GFW ready (low byte == 0xFF) whenever gfw/gfw_ready is present.
+  - Binds die_id / die_id_hash (rows 8-15) into plans and enforces exact match
+    in check and verify whenever present in the baseline.
+  - Re-validates every record's encoding, IFF bit=0, row bounds, duplicate rows,
+    and forbidden device-ID blocks when loading plans.
+  - In verify: requires all SHADOWED expected fields and unchanged DEVID shadows
+    to exist and match (no silent skipping of missing shadows); when --defects
+    is supplied, requires all expected defect masks to exist and match.
 
-Never emits chain 2 blocks 37/38 (PCIe device ID). Every record may only change
-bits inside its target fields; any bit a record would SET is reported.
 Exit status: 0 OK, 1 check failed or input refused.
 """
 import argparse
@@ -41,8 +38,9 @@ SM_HBM = [("OPT_FBIO_DISABLE", 1, 83, 106, "OPT_FBIO_DEFECTIVE"),
 NVLINK = [("OPT_NVLINK_DISABLE", 1, 368, 370, "OPT_NVLINK_DEFECTIVE")]
 UNCHANGED = [("OPT_SYS_PIPE_DISABLE", 1, 372, 379), ("OPT_PCIE_DEVIDA", 2, 593, 608),
              ("OPT_PCIE_DEVIDB", 2, 609, 624)]
-# PCIe: (chain, block, expected old, new, note). Proven on four dies (the author's
-# and three of ours); applied only when the block holds the expected old value.
+UNCHANGED_SHADOWED = ["OPT_PCIE_DEVIDA", "OPT_PCIE_DEVIDB"]
+# PCIe: (chain, block, expected old, new, note). Proven on four dies;
+# applied only when the block holds the expected old value.
 PCIE = [(2, 39, 0x0782, 0x0580, "DISABLE_GEN3_SPEED (bit1+bit9)"),
         (2, 49, 0x00E4, 0x0024, "BOOT_GEN23 + BOOT_GEN3 disable"),
         (2, 47, 0x0059, 0x0000, "PCIE_MAGIC_BITS_D bits 25,22,26,28 (Gen4)"),
@@ -51,9 +49,10 @@ PCIE_REGISTERS = {"DISABLE_GEN3_SPEED 0x820250": "0x00000000",
                   "BOOT_GEN23_DISABLE 0x82057C": "0x00000000",
                   "BOOT_GEN3_DISABLE 0x820580": "0x00000000",
                   "PCIE_MAGIC_BITS_D 0x820520": "0x00200000"}
-# ff_dump.py shadow names checked by verify (the rest have no shadow there).
+# ff_dump.py shadow names checked by verify (the rest live in read_defects.py).
 SHADOWED = ["OPT_GPC_DISABLE", "OPT_FBP_DISABLE", "OPT_FBPA_DISABLE", "OPT_FBIO_DISABLE"] + \
            ["OPT_TPC_DISABLE_GPC%d" % i for i in range(8)]
+DEFECT_FILE_SHADOWS = {"OPT_PES_DISABLE", "OPT_ROP_L2_DISABLE"}
 PLAN_ORDER = ["0_noop", "sm_hbm", "pcie", "nvlink"]
 
 
@@ -64,6 +63,25 @@ class Refused(Exception):
 def load_json(path):
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def check_dump_health(dump):
+    problems = []
+    if dump.get("crc_status") != "0x55":
+        problems.append("CRC %r (want '0x55')" % (dump.get("crc_status"),))
+    if dump.get("controller_idle") is not True:
+        problems.append("controller_idle %r (must be explicitly True)" % (dump.get("controller_idle"),))
+    if "gfw_ready" in dump and dump["gfw_ready"] is not True:
+        problems.append("gfw_ready %r (must be True)" % (dump.get("gfw_ready"),))
+    if "gfw" in dump:
+        try:
+            gfw_val = int(dump["gfw"], 16)
+        except (TypeError, ValueError):
+            problems.append("invalid gfw value %r" % (dump.get("gfw"),))
+        else:
+            if (gfw_val & 0xFF) != 0xFF:
+                problems.append("GFW 0x%08X low byte != 0xFF" % gfw_val)
+    return problems
 
 
 def load_rows(dump):
@@ -153,17 +171,21 @@ def record(c, b, old, new, note=None):
     return r
 
 
-def load_defects(path):
-    regs = {r["name"]: int(r["value"], 16) for r in load_json(path)["registers"]}
-    need = [f[4] for f in SM_HBM + NVLINK]
+def load_defects(path, required_names=None):
+    doc = load_json(path)
+    regs = {r["name"]: int(r["value"], 16) for r in doc["registers"]}
+    need = required_names if required_names is not None else [f[4] for f in SM_HBM + NVLINK]
     missing = [n for n in need if n not in regs]
     if missing:  # never default an unknown defect mask to zero
         raise Refused("defects file lacks %s" % ", ".join(missing))
-    return regs
+    return regs, doc
 
 
 def derive(args):
     dump = load_json(args.dump)
+    health_probs = check_dump_health(dump)
+    if health_probs:
+        raise Refused("stock dump unhealthy: %s" % "; ".join(health_probs))
     rows = load_rows(dump)
     last = occupancy(rows)
     chains = replay(rows)
@@ -172,9 +194,31 @@ def derive(args):
                   for c, bm in dump["chains"].items()}
         if listed != chains:
             raise Refused("rows do not replay to the dump's chains")
-    defects = load_defects(args.defects)
+    # Cross-check shadow registers if present on stock cold dump.
+    if isinstance(dump.get("shadow"), dict):
+        field_map = {f[0]: f for f in SM_HBM}
+        for name in SHADOWED:
+            if name in dump["shadow"]:
+                _, c, lo, hi, _ = field_map[name]
+                replayed = extract(chains, c, lo, hi)
+                sh_val = int(dump["shadow"][name], 16)
+                if replayed != sh_val:
+                    raise Refused("stock dump mismatch: %s replayed 0x%X != shadow 0x%X"
+                                  % (name, replayed, sh_val))
+    defects, defects_doc = load_defects(args.defects)
+    if dump.get("bdf") and defects_doc.get("bdf") and dump["bdf"] != defects_doc["bdf"]:
+        raise Refused("BDF mismatch between dump (%s) and defects (%s)"
+                      % (dump["bdf"], defects_doc["bdf"]))
     fp = fingerprint(rows, last)
-    print("%s: rows %d-%d used, fingerprint %s" % (args.card, FF_START, last, fp))
+    baseline = {"last_row": last, "fingerprint": fp}
+    if "die_id_hash" in dump:
+        baseline["die_id_hash"] = dump["die_id_hash"]
+    if "die_id" in dump:
+        baseline["die_id"] = dump["die_id"]
+    print("%s: rows %d-%d used, fingerprint %s%s" % (
+        args.card, FF_START, last, fp,
+        ("  die_id_hash %s" % baseline["die_id_hash"]) if "die_id_hash" in baseline else "",
+    ))
 
     plans = {}
     if "noop" in args.plans:
@@ -218,7 +262,7 @@ def derive(args):
         plan.update(card=args.card, order=PLAN_ORDER.index(key),
                     source_dump=os.path.basename(args.dump),
                     source_defects=os.path.basename(args.defects),
-                    baseline={"last_row": last, "fingerprint": fp},
+                    baseline=dict(baseline),
                     unchanged_fields={n: "0x%X" % extract(chains, c, lo, hi)
                                       for n, c, lo, hi in UNCHANGED})
     for name, c, lo, hi, dname in SM_HBM + NVLINK:
@@ -239,7 +283,7 @@ def derive(args):
         path = os.path.join(args.out_dir, name)
         if os.path.exists(path) and not args.force:
             raise Refused("%s exists (use --force to replace)" % path)
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             json.dump(plan, f, indent=2)
             f.write("\n")
         print("\n%s" % name)
@@ -250,21 +294,61 @@ def derive(args):
     return 0
 
 
+def validate_plan_records(plans):
+    seen_rows = set()
+    unchanged_sets = set()
+    for path, plan in plans:
+        recs = plan.get("records")
+        if not isinstance(recs, list) or not recs:
+            raise Refused("plan %s has no records" % path)
+        unchanged_sets.add(json.dumps(plan.get("unchanged_fields"), sort_keys=True))
+        for i, r in enumerate(recs):
+            row = r.get("row")
+            c = r.get("chain")
+            b = r.get("block")
+            if not isinstance(row, int) or not (FF_START <= row <= FF_END):
+                raise Refused("plan %s record %d has invalid row %r" % (path, i, row))
+            if row in seen_rows:
+                raise Refused("duplicate target row %d across plans" % row)
+            seen_rows.add(row)
+            if (c, b) in FORBIDDEN:
+                raise Refused("plan %s record %d targets forbidden device-ID block (%s, %s)"
+                              % (path, i, c, b))
+            try:
+                enc = int(r["encoded"], 16)
+                new_d = int(r["new_data"], 16)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise Refused("plan %s record %d malformed: %s" % (path, i, exc)) from exc
+            if enc & 0x20:
+                raise Refused("plan %s record %d sets IFF bit (bit 5)" % (path, i))
+            want_enc = (new_d << 16) | (b << 6) | c
+            if enc != want_enc:
+                raise Refused("plan %s record %d encoded 0x%08X != expected 0x%08X"
+                              % (path, i, enc, want_enc))
+    if len(unchanged_sets) != 1:
+        raise Refused("plans disagree on unchanged_fields")
+
+
 def load_plans(paths):
     plans = [(p, load_json(p)) for p in paths]
     bases = {json.dumps(pl.get("baseline"), sort_keys=True) for _, pl in plans}
     if len(bases) != 1 or not plans[0][1].get("baseline"):
         raise Refused("plans must come from one ffcard.py derive run (baseline differs or missing)")
+    validate_plan_records(plans)
     plans.sort(key=lambda x: x[1]["records"][0]["row"])
     return plans, plans[0][1]["baseline"]
 
 
 def compare(dump, plans, base):
     """Per-record state against the plans. Returns (rows, burned, pending, problems)."""
-    problems = []
-    if dump.get("crc_status") != "0x55" or dump.get("controller_idle") is False:
-        problems.append("CRC %s / idle %s (want 0x55 / True)" %
-                        (dump.get("crc_status"), dump.get("controller_idle")))
+    problems = check_dump_health(dump)
+    if "die_id_hash" in base:
+        if dump.get("die_id_hash") != base["die_id_hash"]:
+            problems.append("die_id_hash %r != plan baseline %r: NOT the planned card"
+                            % (dump.get("die_id_hash"), base["die_id_hash"]))
+    if "die_id" in base:
+        if dump.get("die_id") != base["die_id"]:
+            problems.append("die_id rows 8-15 differ from plan baseline: NOT the planned card")
     rows = load_rows(dump)
     fp = fingerprint(rows, base["last_row"])
     if fp != base["fingerprint"]:
@@ -317,6 +401,11 @@ def verify(args):
         problems.append("not burned: %s index %d (row %d = %s)" % (name, i, row, enc))
     chains = replay(rows)
     fields = {f[0]: f for f in SM_HBM + NVLINK}
+    shadow_dict = dump.get("shadow")
+    if not isinstance(shadow_dict, dict):
+        problems.append("dump is missing required 'shadow' register dict")
+        shadow_dict = {}
+
     for _, plan in plans:
         for name, want in plan.get("expect_fields", {}).items():
             _, c, lo, hi, _ = fields[name]
@@ -324,23 +413,44 @@ def verify(args):
             print("  %-22s 0x%-8X %s" % (name, got, "OK" if got == int(want, 16) else "FAIL want " + want))
             if got != int(want, 16):
                 problems.append("%s = 0x%X, want %s" % (name, got, want))
-            shadow = dump.get("shadow", {}).get(name)
-            if shadow is not None and int(shadow, 16) != int(want, 16):
-                problems.append("shadow %s = %s, want %s" % (name, shadow, want))
+            if name in SHADOWED:
+                shadow = shadow_dict.get(name)
+                if shadow is None:
+                    problems.append("missing required shadow register %s" % name)
+                elif int(shadow, 16) != int(want, 16):
+                    problems.append("shadow %s = %s, want %s" % (name, shadow, want))
+
     for name, c, lo, hi in UNCHANGED:
         want = int(plans[0][1]["unchanged_fields"][name], 16)
         got = extract(chains, c, lo, hi)
         print("  %-22s 0x%-8X %s" % (name, got, "unchanged" if got == want else "CHANGED"))
         if got != want:
             problems.append("%s changed: 0x%X, was 0x%X" % (name, got, want))
+        if name in UNCHANGED_SHADOWED:
+            sh = shadow_dict.get(name)
+            if sh is None:
+                problems.append("missing required unchanged shadow register %s" % name)
+            elif int(sh, 16) != want:
+                problems.append("shadow %s = %s, want unchanged 0x%X" % (name, sh, want))
+
     if args.defects:
-        regs = {r["name"]: int(r["value"], 16) for r in load_json(args.defects)["registers"]}
+        need_defects = [
+            fields[name][4]
+            for _, plan in plans
+            for name in plan.get("expect_fields", {})
+        ]
+        regs, _ = load_defects(args.defects, required_names=need_defects)
         for _, plan in plans:
             for name, want in plan.get("expect_fields", {}).items():
                 dname = fields[name][4]
-                if dname in regs and regs[dname] != int(want, 16):
+                if regs[dname] != int(want, 16):
                     problems.append("defect mask %s now 0x%X, planned for %s" % (dname, regs[dname], want))
-    status = {k: v for k, v in dump.get("shadow", {}).items()
+                if name in DEFECT_FILE_SHADOWS and name in regs:
+                    if regs[name] != int(want, 16):
+                        problems.append("shadow %s in defects file = 0x%X, want %s"
+                                        % (name, regs[name], want))
+
+    status = {k: v for k, v in shadow_dict.items()
               if k.startswith("STATUS_OPT_TPC_GPC") and int(v, 16)}
     if status:
         print("note: %s nonzero (runtime TPC mask, not a fuse; may cost SMs)" %
@@ -349,7 +459,13 @@ def verify(args):
         if plan.get("expect_registers"):
             print("PCIe registers are not in the dump: run pcie_state.py (targets %s)" %
                   ", ".join("%s=%s" % kv for kv in plan["expect_registers"].items()))
-    nxt = next((i for i in range(base["last_row"] + 1, FF_END + 1) if not rows[i]), None)
+
+    last_plan_row = max(
+        (r["row"] for _, pl in plans for r in pl["records"]),
+        default=base["last_row"],
+    )
+    nxt = next((i for i in range(max(base["last_row"], last_plan_row) + 1, FF_END + 1)
+                if not rows[i]), None)
     print("first blank row: %s" % nxt)
     for p in problems:
         print("FAIL: %s" % p)

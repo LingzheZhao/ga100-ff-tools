@@ -23,11 +23,28 @@ DEFECTS = {'OPT_FBIO_DEFECTIVE': 0xc03000, 'OPT_FBPA_DEFECTIVE': 0xc03000,
 DEFECTS['OPT_TPC_GPC6_DEFECTIVE'] = 0x08
 
 
-def dump(words):
+def dump(words, include_shadow=True, die_id_hash='0123456789abcdef'):
     """ff_dump.py-shaped JSON for rows 222-487 holding these words in order."""
     rows = [{'row': 222 + i, 'raw': '0x%08X' % (words[i] if i < len(words) else 0)}
             for i in range(266)]
-    return {'crc_status': '0x55', 'controller_idle': True, 'read_errors': [], 'rows': rows}
+    out = {'crc_status': '0x55', 'controller_idle': True, 'gfw': '0x000000FF',
+           'gfw_ready': True, 'read_errors': [], 'rows': rows}
+    if die_id_hash is not None:
+        out['die_id_hash'] = die_id_hash
+    if include_shadow:
+        row_map = {r['row']: int(r['raw'], 16) for r in rows}
+        chains = f.replay(row_map)
+        field_map = {x[0]: x for x in f.SM_HBM}
+        unchanged_map = {x[0]: x for x in f.UNCHANGED}
+        shadow = {}
+        for name in f.SHADOWED:
+            _, c, lo, hi, _ = field_map[name]
+            shadow[name] = '0x%08X' % f.extract(chains, c, lo, hi)
+        for name in f.UNCHANGED_SHADOWED:
+            _, c, lo, hi = unchanged_map[name]
+            shadow[name] = '0x%08X' % f.extract(chains, c, lo, hi)
+        out['shadow'] = shadow
+    return out
 
 
 def stock_words():
