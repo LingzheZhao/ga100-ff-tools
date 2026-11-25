@@ -7,9 +7,9 @@ import struct
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[1]/'planner'
-f = SourceFileLoader('local_ffcard', str(ROOT/'ffcard.py')).load_module()
-ps = SourceFileLoader('local_pcie_state', str(ROOT/'pcie_state.py')).load_module()
+ROOT = Path(__file__).resolve().parents[1] / 'planner'
+f = SourceFileLoader('local_ffcard', str(ROOT / 'ffcard.py')).load_module()
+ps = SourceFileLoader('local_pcie_state', str(ROOT / 'pcie_state.py')).load_module()
 
 # Synthetic stock die: every chain-1 field block fully disabled except the
 # SYS_PIPE/NVLink block, PCIe blocks at the proven stock values.
@@ -23,19 +23,33 @@ DEFECTS = {'OPT_FBIO_DEFECTIVE': 0xc03000, 'OPT_FBPA_DEFECTIVE': 0xc03000,
 DEFECTS['OPT_TPC_GPC6_DEFECTIVE'] = 0x08
 
 
-def dump(words, include_shadow=True, die_id_hash='0123456789abcdef'):
-    """ff_dump.py-shaped JSON for rows 222-487 holding these words in order."""
+def dump(words, include_shadow=True, include_defects=True, dsov=1,
+         die_id_hash='0123456789abcdef', defects_override=None):
+    """ff_dump.py-shaped JSON (v2) for rows 222-487 holding these words in order."""
     rows = [{'row': 222 + i, 'raw': '0x%08X' % (words[i] if i < len(words) else 0)}
             for i in range(266)]
-    out = {'crc_status': '0x55', 'controller_idle': True, 'gfw': '0x000000FF',
-           'gfw_ready': True, 'read_errors': [], 'rows': rows}
+    row_map = {r['row']: int(r['raw'], 16) for r in rows}
+    chains = f.replay(row_map)
+    field_map = {x[0]: x for x in f.SM_HBM}
+    unchanged_map = {x[0]: x for x in f.UNCHANGED}
+    out = {
+        'schema_version': 2,
+        'boot0': '0x170000A1',
+        'crc_status': '0x55',
+        'controller_idle': True,
+        'gfw': '0x000000FF',
+        'gfw_ready': True,
+        'shadow_only': False,
+        'control': {
+            'DSOV': '0x%08X' % dsov,
+            'DEBUGCTRL': '0x00000000',
+        },
+        'read_errors': [],
+        'rows': rows,
+    }
     if die_id_hash is not None:
         out['die_id_hash'] = die_id_hash
     if include_shadow:
-        row_map = {r['row']: int(r['raw'], 16) for r in rows}
-        chains = f.replay(row_map)
-        field_map = {x[0]: x for x in f.SM_HBM}
-        unchanged_map = {x[0]: x for x in f.UNCHANGED}
         shadow = {}
         for name in f.SHADOWED:
             _, c, lo, hi, _ = field_map[name]
@@ -44,6 +58,13 @@ def dump(words, include_shadow=True, die_id_hash='0123456789abcdef'):
             _, c, lo, hi = unchanged_map[name]
             shadow[name] = '0x%08X' % f.extract(chains, c, lo, hi)
         out['shadow'] = shadow
+    if include_defects:
+        dsrc = dict(DEFECTS if defects_override is None else defects_override)
+        # Include PES / ROP_L2 disable shadows reflecting current chains (cold boot)
+        for sh_name in f.DEFECT_FILE_SHADOWS:
+            _, c, lo, hi, _ = field_map[sh_name]
+            dsrc.setdefault(sh_name, f.extract(chains, c, lo, hi))
+        out['defects'] = {n: '0x%08X' % v for n, v in dsrc.items()}
     return out
 
 
@@ -56,13 +77,15 @@ class Cmp170Tests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.dir = Path(self.temp.name)
-        self.write('stock.json', dump(stock_words()))
-        self.write('defects.json', {'registers': [{'name': n, 'value': '0x%08X' % v}
-                                                  for n, v in DEFECTS.items()]})
+        self.write('stock.json', dump(stock_words(), dsov=1))
+        self.write('defects.json', {
+            'die_id_hash': '0123456789abcdef',
+            'registers': [{'name': n, 'value': '0x%08X' % v} for n, v in DEFECTS.items()],
+        })
 
     def write(self, name, obj):
-        (self.dir/name).write_text(json.dumps(obj))
-        return str(self.dir/name)
+        (self.dir / name).write_text(json.dumps(obj))
+        return str(self.dir / name)
 
     def run_cli(self, *argv):
         out = io.StringIO()
@@ -71,50 +94,55 @@ class Cmp170Tests(unittest.TestCase):
         return rc, out.getvalue()
 
     def derive(self, *extra):
-        rc, out = self.run_cli('derive', '--card', 't', '--dump', self.dir/'stock.json',
-                               '--defects', self.dir/'defects.json', '--out-dir', self.dir/'plans', *extra)
+        rc, out = self.run_cli('derive', '--card', 't', '--dump', self.dir / 'stock.json',
+                               '--out-dir', self.dir / 'plans', *extra)
         self.assertEqual(rc, 0, out)
-        return sorted((self.dir/'plans').glob('t_plan_*.json'))
+        return sorted((self.dir / 'plans').glob('t_plan_*.json'))
 
     def records(self, plans):
         recs = [r for p in plans for r in json.loads(p.read_text())['records']]
         return sorted(recs, key=lambda r: r['row'])
 
-    def burned(self, n):
-        """Window dump with the first n planned records burned."""
-        recs = self.records(sorted((self.dir/'plans').glob('t_plan_*.json')))
-        return self.write('window.json', dump(stock_words() + [int(r['encoded'], 16) for r in recs[:n]]))
+    def burned(self, n, dsov=0, name='window.json'):
+        """Dump with the first n planned records burned (dsov=0 in-window, dsov=1 cold-boot)."""
+        recs = self.records(sorted((self.dir / 'plans').glob('t_plan_*.json')))
+        return self.write(name, dump(stock_words() + [int(r['encoded'], 16) for r in recs[:n]], dsov=dsov))
 
     def test_derive_only_clears_field_bits_and_never_device_id(self):
         plans = self.derive()
         self.assertEqual([p.name for p in plans], ['t_plan_0_noop.json', 't_plan_nvlink.json',
                                                    't_plan_pcie.json', 't_plan_sm_hbm.json'])
+        self.assertTrue((self.dir / 'plans' / 't_manifest.json').exists())
         recs = self.records(plans)
         last = 222 + len(STOCK) - 1
         self.assertEqual([r['row'] for r in recs], list(range(last + 1, last + 1 + len(recs))))
         for r in recs:
             self.assertNotIn((r['chain'], r['block']), f.FORBIDDEN)
             self.assertNotIn('sets_bits', r)
-        nv, = json.loads((self.dir/'plans'/'t_plan_nvlink.json').read_text())['records']
+        nv, = json.loads((self.dir / 'plans' / 't_plan_nvlink.json').read_text())['records']
         self.assertEqual((nv['old_data'], nv['new_data']), ('0x0FEF', '0x0FE8'))  # SYS_PIPE kept
 
-    def test_skip_rows_leaves_a_blank_buffer(self):
+    def test_skip_rows_leaves_a_blank_buffer_and_rejects_negative(self):
         recs = self.records(self.derive('--skip-rows', '4'))
         self.assertEqual(recs[0]['row'], 222 + len(STOCK) + 4)
+        rc, out = self.run_cli('derive', '--card', 't2', '--dump', self.dir / 'stock.json',
+                               '--out-dir', self.dir / 'plans2', '--skip-rows', '-1')
+        self.assertEqual(rc, 1)
+        self.assertIn('--skip-rows', out)
 
     def test_check_resumes_and_verify_passes_after_all_records(self):
         plans = self.derive()
         n = len(self.records(plans))
-        rc, out = self.run_cli('check', '--dump', self.burned(0), *plans)
+        rc, out = self.run_cli('check', '--dump', self.burned(0, dsov=0), *plans)
         self.assertEqual(rc, 0, out)
         self.assertIn('--plan t_plan_0_noop.json --index 0', out)
-        rc, out = self.run_cli('check', '--dump', self.burned(3), *plans)
+        rc, out = self.run_cli('check', '--dump', self.burned(3, dsov=0), *plans)
         self.assertEqual(rc, 0, out)
         self.assertIn('--plan t_plan_sm_hbm.json --index 2', out)
-        rc, out = self.run_cli('verify', '--dump', self.burned(3), *plans)
+        rc, out = self.run_cli('verify', '--dump', self.burned(3, dsov=1, name='cold3.json'), *plans)
         self.assertEqual(rc, 1)
         self.assertIn('not burned', out)
-        rc, out = self.run_cli('verify', '--dump', self.burned(n), '--defects', self.dir/'defects.json', *plans)
+        rc, out = self.run_cli('verify', '--dump', self.burned(n, dsov=1, name='cold_all.json'), *plans)
         self.assertEqual(rc, 0, out)
         self.assertIn('VERIFY PASS', out)
 
@@ -122,30 +150,30 @@ class Cmp170Tests(unittest.TestCase):
         plans = self.derive()
         other = stock_words()
         other[0] ^= 1 << 16
-        rc, out = self.run_cli('check', '--dump', self.write('other.json', dump(other)), *plans)
+        rc, out = self.run_cli('check', '--dump', self.write('other.json', dump(other, dsov=0)), *plans)
         self.assertEqual(rc, 1)
         self.assertIn('NOT the planned card', out)
-        rc, out = self.run_cli('check', '--dump', self.write('bad.json', dump(stock_words() + [0x12340141])), *plans)
+        rc, out = self.run_cli('check', '--dump', self.write('bad.json', dump(stock_words() + [0x12340141], dsov=0)), *plans)
         self.assertEqual(rc, 1)
         self.assertIn('plan 0xFFFF01C1', out)
         recs = self.records(plans)
         words = stock_words() + [int(r['encoded'], 16) for r in recs] + [0x00000141]
-        rc, out = self.run_cli('check', '--dump', self.write('stray.json', dump(words)), *plans)
+        rc, out = self.run_cli('check', '--dump', self.write('stray.json', dump(words, dsov=0)), *plans)
         self.assertEqual(rc, 1)
         self.assertIn('outside the plans', out)
 
     def test_missing_defect_mask_is_refused_not_zero(self):
-        self.write('defects.json', {'registers': [{'name': n, 'value': '0x0'}
-                                                  for n in DEFECTS if n != 'OPT_PES_DEFECTIVE']})
-        rc, out = self.run_cli('derive', '--card', 't', '--dump', self.dir/'stock.json',
-                               '--defects', self.dir/'defects.json', '--out-dir', self.dir/'plans')
+        bad_def = {k: v for k, v in DEFECTS.items() if k != 'OPT_PES_DEFECTIVE'}
+        self.write('stock_bad_def.json', dump(stock_words(), dsov=1, defects_override=bad_def))
+        rc, out = self.run_cli('derive', '--card', 't', '--dump', self.dir / 'stock_bad_def.json',
+                               '--out-dir', self.dir / 'plans')
         self.assertEqual(rc, 1)
         self.assertIn('OPT_PES_DEFECTIVE', out)
 
     def test_unexpected_pcie_block_skips_only_the_pcie_plan(self):
         STOCK[(2, 47)] = 0x0058
         self.addCleanup(STOCK.__setitem__, (2, 47), 0x0059)
-        self.write('stock.json', dump(stock_words()))
+        self.write('stock.json', dump(stock_words(), dsov=1))
         names = [p.name for p in self.derive()]
         self.assertNotIn('t_plan_pcie.json', names)
         self.assertIn('t_plan_sm_hbm.json', names)

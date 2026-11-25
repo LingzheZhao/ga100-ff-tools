@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Read-only GA100 fuseless-fuse (FF) dump + decoder.
+"""Read-only GA100 fuseless-fuse (FF) dump + decoder + bound defect masks.
 
-Dumps raw FF rows (222-487) and die-ID rows (8-15), decodes each record
-(chain / block / data), reconstructs the chains, and infers option words.
-Also reads the shadow OPT_* and status registers for cross-check.
+Dumps raw FF rows (222-487), die-ID rows (8-15), defect masks (OPT_*_DEFECTIVE
++ OPT_PES_DISABLE/OPT_ROP_L2_DISABLE), and shadow OPT_* registers in ONE
+single-card session so defects can never be mismatched across cards.
 
 Hardened safety guarantees:
   - Single aligned 32-bit BAR0 reads/writes (never struct.pack_into).
   - --shadow-only opens resource0 O_RDONLY (cannot write GPU).
-  - Refuses raw CMD_READ unless FUSECTRL is IDLE, GFW (0x118234) low byte is
-    0xFF, and CRC_STATUS is 0x55 (exit 1, zero fuse commands issued).
+  - In raw mode, verifies FUSECTRL IDLE, BOOT0=GA100, GFW (0x118234) low byte
+    == 0xFF, CRC_STATUS == 0x55, and DEBUGCTRL.RWL == 0 BEFORE reading shadow
+    registers, defect masks, or issuing any CMD_READ (zero wasted reads on fault).
   - Aborts immediately on the first poison (0xBADxxxxx), dead BAR0, or row
     timeout — never loops through remaining rows or writes a partial dump.
+  - Refuses to overwrite an existing --out file unless --force is given.
 
 Run on the GPU host:
   sudo python3 planner/ff_dump.py --bdf 0000:01:00.0 --out card01-ff.json
@@ -19,6 +21,7 @@ Run on the GPU host:
   sudo python3 planner/ff_dump.py --bdf 0000:01:00.0 --shadow-only
 """
 import argparse
+import datetime
 import json
 import os
 import sys
@@ -30,6 +33,7 @@ from common.bar0 import (  # noqa: E402
     Bar0Abort,
     CRC_STATUS,
     DEBUGCTRL,
+    DEFECT_REGS,
     DSOV,
     EFP,
     EN_SW_OVERRIDE,
@@ -38,8 +42,10 @@ from common.bar0 import (  # noqa: E402
     FUSECTRL_PLM,
     FUSEOPT_PLM,
     FUSEWDATA_PLM,
+    RWL_BIT,
     SBFE,
     WDATA_WR_SECURE,
+    die_id_hash,
     gfw_ready,
     is_idle,
 )
@@ -113,15 +119,29 @@ def extract(chains, chain, lo, hi):
     return (v >> lo) & ((1 << (hi - lo + 1)) - 1)
 
 
+def _read_boot_id():
+    try:
+        with open("/proc/sys/kernel/random/boot_id", encoding="ascii") as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
 def capture_with_bar(bar, bdf, start=FF_START, end=FF_END, shadow_only=False,
                      all_rows=False, read_die_id=True):
-    health = bar.check_health_first(require_idle=(not shadow_only), require_gfw=(not shadow_only))
+    # Gate 1: FUSECTRL IDLE, BOOT0=GA100, and GFW immediately (zero further reads on fault).
+    health = bar.check_health_first(require_idle=True, require_gfw=True)
     crc = bar.rd_checked(CRC_STATUS, "CRC_STATUS")
+    if not shadow_only and crc != 0x55:
+        raise Bar0Abort("refused raw capture: CRC_STATUS=0x%02X (want 0x55; stopped immediately)" % crc)
+    dbg = bar.rd_checked(DEBUGCTRL, "DEBUGCTRL")
+    if not shadow_only and (dbg & RWL_BIT) != 0:
+        raise Bar0Abort("refused raw capture: DEBUGCTRL.RWL!=0 (0x%08X; wrong array; STOP)" % dbg)
+
     dsov = bar.rd_checked(DSOV, "DSOV")
     efp = bar.rd_checked(EFP, "EFP")
     sbfe = bar.rd_checked(SBFE, "SBFE")
     en_sw = bar.rd_checked(EN_SW_OVERRIDE, "EN_SW_OVERRIDE")
-    dbg = bar.rd_checked(DEBUGCTRL, "DEBUGCTRL")
     wdata_sec = bar.rd_checked(WDATA_WR_SECURE, "WDATA_WR_SECURE")
     wplm = bar.rd_checked(FUSEWDATA_PLM, "FUSEWDATA_PLM", allow_all_ones=True)
     cplm = bar.rd_checked(FUSECTRL_PLM, "FUSECTRL_PLM", allow_all_ones=True)
@@ -130,6 +150,9 @@ def capture_with_bar(bar, bdf, start=FF_START, end=FF_END, shadow_only=False,
     idle = is_idle(health["fusectrl"])
     gfw_ok = gfw_ready(health["gfw"])
     report = {
+        "schema_version": 2,
+        "captured_utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "boot_id": _read_boot_id(),
         "bdf": bdf,
         "read_only": True,
         "shadow_only": shadow_only,
@@ -154,22 +177,17 @@ def capture_with_bar(bar, bdf, start=FF_START, end=FF_END, shadow_only=False,
 
     shadow = {n: "0x%08X" % bar.rd_checked(o, n) for n, o in SHADOW.items()}
     report["shadow"] = shadow
+    defects = {n: "0x%08X" % bar.rd_checked(o, n) for n, o in DEFECT_REGS}
+    report["defects"] = defects
 
     if shadow_only:
         return report
-
-    if not idle or not gfw_ok or crc != 0x55:
-        raise Bar0Abort(
-            "refused raw CMD_READ: idle=%s gfw_ready=%s (0x%08X) crc=0x%02X (want True/True/0x55)"
-            % (idle, gfw_ok, health["gfw"], crc)
-        )
 
     if all_rows:
         raw_all = [bar.read_row(r) for r in range(512)]
         report["all_rows"] = {str(r): "0x%08X" % raw_all[r] for r in range(512)}
         die_vals = raw_all[8:16]
         report["die_id"] = ["0x%08X" % v for v in die_vals]
-        from common.bar0 import die_id_hash
         report["die_id_hash"] = die_id_hash(die_vals)
         row_values = {r: raw_all[r] for r in range(start, end + 1)}
     else:
@@ -209,17 +227,18 @@ def capture_with_bar(bar, bdf, start=FF_START, end=FF_END, shadow_only=False,
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Read-only GA100 FF dump + decoder")
+    ap = argparse.ArgumentParser(description="Read-only GA100 FF dump + bound defects + decoder")
     ap.add_argument("--bdf", required=True)
     ap.add_argument("--start", type=int, default=FF_START)
     ap.add_argument("--end", type=int, default=FF_END)
     ap.add_argument("--shadow-only", action="store_true",
-                    help="pure MMIO reads of option registers; O_RDONLY; zero fuse commands")
+                    help="pure MMIO reads of option/defect registers; O_RDONLY; zero fuse commands")
     ap.add_argument("--all-rows", action="store_true",
                     help="also archive all 512 physical fuse rows (0-511) in all_rows")
     ap.add_argument("--no-die-id", action="store_true",
-                    help="skip reading die-ID rows 8-15 (not recommended)")
-    ap.add_argument("--out", default=None, help="save JSON dump to this file")
+                    help="skip reading die-ID rows 8-15 (not recommended; ffcard requires die_id)")
+    ap.add_argument("--out", default=None, help="save JSON dump to this file (refuses existing unless --force)")
+    ap.add_argument("--force", action="store_true", help="allow replacing an existing --out file")
     args = ap.parse_args()
     if sys.platform != "linux":
         print(json.dumps({"error": "Requires Linux (sysfs BAR0)"}))
@@ -229,6 +248,10 @@ def main():
         return 2
     if not (0 <= args.start <= args.end <= 511):
         print(json.dumps({"error": "Invalid row range %d..%d" % (args.start, args.end)}))
+        return 2
+    if args.out and os.path.exists(args.out) and not args.force:
+        print("ABORT: output file %s already exists (use a fresh filename or --force)" % args.out,
+              file=sys.stderr)
         return 2
 
     try:
@@ -250,9 +273,10 @@ def main():
 
     # ---- console output ----
     print("=== GA100 FF dump (READ-ONLY) ===")
-    print("BOOT0=%s  GFW=%s (ready=%s)  FUSECTRL=%s  CRC=%s  idle=%s" % (
+    print("BOOT0=%s  GFW=%s (ready=%s)  FUSECTRL=%s  CRC=%s  idle=%s  DSOV=%s" % (
         report["boot0"], report["gfw"], report["gfw_ready"],
         report["fusectrl"], report["crc_status"], report["controller_idle"],
+        report["control"]["DSOV"],
     ))
     if "die_id_hash" in report:
         print("die_id_hash=%s  rows[8..15]=%s" % (report["die_id_hash"], ",".join(report["die_id"])))

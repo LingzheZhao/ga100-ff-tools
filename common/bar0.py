@@ -1,14 +1,13 @@
 """Hardened GA100 BAR0 MMIO and fuse-controller access helpers.
 
 Safety invariants enforced for every live GPU script in ga100-ff-tools:
-  1. Single aligned 32-bit MMIO reads/writes via memoryview(...).cast("I") —
-     never struct.pack_into (which zeroes the target slot before packing).
+  1. Single aligned 32-bit MMIO reads/writes via memoryview(...).cast("I") with
+     explicit alignment and bounds checks — never struct.pack_into.
   2. Fail-fast on FUSECTRL first, NVIDIA PRI poison (0xBAD0xxxx..0xBADFxxxx),
-     dead BAR0 (0xFFFFFFFF on non-PLM registers), GFW not ready (0x118234 low
-     byte != 0xFF), or poll timeout — zero extra register reads and zero
-     finally-block register writes after any error.
-  3. PCI vendor/device check (NVIDIA GA100 CMP 170HX 10de:20c2 / A100 10de:20b5)
-     before opening resource0 so a BDF typo cannot touch another PCI device.
+     dead BAR0 (0xFFFFFFFF on non-PLM registers), BOOT0 != GA100 (0x170000A1),
+     GFW not ready (0x118234 low byte != 0xFF), or poll timeout — zero extra
+     register reads and zero finally-block register writes after any error.
+  3. PCI vendor/device check (NVIDIA GA100) before opening resource0.
   4. Read-only mode opens resource0 with O_RDONLY + PROT_READ and refuses wr().
 """
 import hashlib
@@ -62,6 +61,24 @@ ALLOWED_PCI_IDS = {
     (0x10DE, 0x20F1),  # A100 PCIe 40GB
 }
 
+# Canonical GA100 defect masks + PES/ROP_L2 disable shadows (captured alongside
+# die-ID and FF rows inside a single ff_dump.py session to prevent cross-card mixup).
+DEFECT_REGS = [
+    ("OPT_GPC_DEFECTIVE", 0x8205C4),
+    ("OPT_FBP_DEFECTIVE", 0x8205CC),
+    ("OPT_FBPA_DEFECTIVE", 0x8205D0),
+    ("OPT_FBIO_DEFECTIVE", 0x8205D4),
+    ("OPT_PES_DEFECTIVE", 0x820698),
+    ("OPT_ROP_L2_DEFECTIVE", 0x8205E8),
+    ("OPT_NVLINK_DEFECTIVE", 0x82068C),
+    ("OPT_PES_DISABLE", 0x820690),
+    ("OPT_ROP_L2_DISABLE", 0x8202C4),
+] + [
+    ("OPT_TPC_GPC%d_DEFECTIVE" % i, o)
+    for i, o in enumerate((0x8205C8, 0x820508, 0x82050C, 0x820514,
+                           0x820564, 0x8205AC, 0x820B84, 0x820B80))
+]
+
 
 class Bar0Abort(RuntimeError):
     """Raised immediately on poison, dead BAR0, non-IDLE controller, or timeout."""
@@ -73,7 +90,12 @@ def is_poisoned(val):
 
 
 def is_idle(fusectrl):
-    return not is_poisoned(fusectrl) and fusectrl != 0xFFFFFFFF and (fusectrl & STATE_MASK) == STATE_IDLE
+    return (
+        not is_poisoned(fusectrl)
+        and fusectrl != 0xFFFFFFFF
+        and (fusectrl & STATE_MASK) == STATE_IDLE
+        and (fusectrl & 0xF) == 0
+    )
 
 
 def gfw_ready(gfw):
@@ -127,9 +149,12 @@ class Bar0:
             self.fd = None
             raise
 
+    def _check_off(self, off):
+        if not isinstance(off, int) or (off & 3) or off < 0 or off + 4 > MAP_BYTES:
+            raise ValueError("invalid/unaligned BAR0 offset 0x%X" % off)
+
     def rd(self, off):
-        if off & 3:
-            raise ValueError("unaligned BAR0 read offset 0x%X" % off)
+        self._check_off(off)
         mv = memoryview(self.mm)[off:off + 4].cast("I")
         try:
             return int(mv[0])
@@ -148,8 +173,7 @@ class Bar0:
     def wr(self, off, val):
         if self.read_only:
             raise PermissionError("refused BAR0 write to 0x%06X on read-only mapping" % off)
-        if off & 3:
-            raise ValueError("unaligned BAR0 write offset 0x%X" % off)
+        self._check_off(off)
         if not isinstance(val, int) or val < 0 or val > 0xFFFFFFFF:
             raise ValueError("32-bit BAR0 write value out of range: %r" % (val,))
         mv = memoryview(self.mm)[off:off + 4].cast("I")
@@ -158,12 +182,15 @@ class Bar0:
         finally:
             mv.release()
 
-    def check_health_first(self, require_idle=True, require_gfw=True):
+    def check_health_first(self, require_idle=True, require_gfw=True, require_ga100=True):
         """Read FUSECTRL first, then BOOT0 and GFW; abort immediately on any fault."""
         fc = self.rd_checked(FUSECTRL, "FUSECTRL")
         if require_idle and not is_idle(fc):
             raise Bar0Abort("FUSECTRL not IDLE: 0x%08X (STOP immediately)" % fc)
         boot0 = self.rd_checked(BOOT0, "BOOT0")
+        if require_ga100 and boot0 != GA100_BOOT0:
+            raise Bar0Abort("unexpected PMC_BOOT_0=0x%08X (expected GA100 0x%08X; STOP)"
+                            % (boot0, GA100_BOOT0))
         gfw = self.rd_checked(GFW_BOOT, "GFW_BOOT(0x118234)")
         if require_gfw and not gfw_ready(gfw):
             raise Bar0Abort("GFW boot not complete: 0x118234=0x%08X (low byte != 0xFF; STOP)" % gfw)
@@ -172,10 +199,15 @@ class Bar0:
     def poll_idle(self, timeout_ms=1000, sleep_s=0.001):
         """Poll FUSECTRL until IDLE. Aborts immediately on poison/0xFFFFFFFF or timeout."""
         deadline = time.monotonic() + timeout_ms / 1000.0
+        first = True
         last = None
         while True:
+            if not first and time.monotonic() >= deadline:
+                raise Bar0Abort("FUSECTRL did not return to IDLE within %d ms (last=0x%08X; STOP)"
+                                % (timeout_ms, last))
+            first = False
             fc = self.rd_checked(FUSECTRL, "FUSECTRL")
-            if (fc & STATE_MASK) == STATE_IDLE:
+            if is_idle(fc):
                 return fc
             last = fc
             if time.monotonic() >= deadline:
@@ -186,13 +218,16 @@ class Bar0:
 
     def read_row(self, row, timeout_ms=1000):
         """Non-destructive CMD_READ of a single physical fuse row. Never writes FUSEWDATA."""
-        if not (0 <= row <= 511):
-            raise ValueError("fuse row out of range 0..511: %d" % row)
+        if not isinstance(row, int) or not (0 <= row <= 511):
+            raise ValueError("fuse row out of range 0..511: %r" % (row,))
         fc = self.rd_checked(FUSECTRL, "FUSECTRL")
         if not is_idle(fc):
             raise Bar0Abort("FUSECTRL not IDLE before CMD_READ row %d: 0x%08X" % (row, fc))
         self.wr(FUSECTRL, CMD_IDLE)
         self.wr(FUSEADDR, row)
+        latched = self.rd_checked(FUSEADDR, "FUSEADDR")
+        if latched != row:
+            raise Bar0Abort("FUSEADDR did not latch row %d (read back 0x%08X; STOP)" % (row, latched))
         self.wr(FUSECTRL, CMD_READ)
         self.poll_idle(timeout_ms)
         # Raw fuse rows can legitimately hold any 32-bit pattern (including 0xFFFFFFFF or 0xBADxxxxx).

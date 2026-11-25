@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.bar0 import (  # noqa: E402
     Bar0,
     Bar0Abort,
+    CRC_STATUS,
     DSOV,
     EN_SW_OVERRIDE,
 )
@@ -28,6 +29,7 @@ from common.bar0 import (  # noqa: E402
 
 def run_with_bar(bar, bdf, value, read_only):
     health = bar.check_health_first(require_idle=True, require_gfw=True)
+    crc = bar.rd_checked(CRC_STATUS, "CRC_STATUS")
     dsov = bar.rd_checked(DSOV, "DSOV")
     before = bar.rd_checked(EN_SW_OVERRIDE, "EN_SW_OVERRIDE")
     out = {
@@ -35,12 +37,17 @@ def run_with_bar(bar, bdf, value, read_only):
         "fusectrl": "0x%08X" % health["fusectrl"],
         "boot0": "0x%08X" % health["boot0"],
         "gfw": "0x%08X" % health["gfw"],
+        "crc_status": "0x%02X" % crc,
         "dsov": dsov,
         "before": "0x%08X" % before,
         "requested": value,
         "read_only": read_only,
     }
     if not read_only:
+        if crc != 0x55:
+            out["works"] = False
+            out["note"] = "ABORT: CRC_STATUS=0x%02X != 0x55; refused to write EN_SW_OVERRIDE" % crc
+            return out
         if value == 1 and dsov != 0:
             out["works"] = False
             out["note"] = "ABORT: DSOV != 0; refused to write EN_SW_OVERRIDE (not in glitch window)"
