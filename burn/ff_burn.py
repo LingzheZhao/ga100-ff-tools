@@ -19,8 +19,9 @@ Hardened safety guarantees:
   - Live card identity + full prefix verification: reads die-ID (rows 8-15),
     baseline rows (222..last_row) fingerprint, every prior_records + records[:index]
     burned prefix row, ensures no stray rows, and ensures target row is blank.
-  - Re-verifies ALL register prerequisites AND FUSEADDR/FUSEWDATA latch readback
-    AFTER human types BURN (with confirmation expiry timeout).
+  - Re-verifies ALL register prerequisites AND FUSEADDR latch readback AFTER
+    human types BURN (with confirmation expiry timeout). Note: NV_FUSE_FUSEWDATA
+    (0x82000C) is hardware write-only (-W-4R) on GA100 and always reads back 0.
   - Single aligned 32-bit BAR0 writes (memoryview cast, never struct.pack_into);
     zero extra register reads and zero retries on poison/timeout/mismatch.
 
@@ -325,16 +326,14 @@ def execute_plan(bar, plan, index, confirm=False, input_fn=input, journal_path=N
               % (failed[0], failed[2]))
         return 1
 
-    # Latch address and data and verify readback BEFORE marking IN_FLIGHT or issuing CMD_WRITE.
+    # Latch address (read-write, verify readback) and write data (NV_FUSE_FUSEWDATA
+    # 0x82000C is hardware write-only -W-4R on GA100 and always reads back 0).
     bar.wr(FUSECTRL, CMD_IDLE)
     bar.wr(FUSEADDR, row)
     addr_rb = bar.rd_checked(FUSEADDR, "FUSEADDR")
     if addr_rb != row:
         raise Bar0Abort("FUSEADDR did not latch row %d (got 0x%08X; STOP before CMD_WRITE)" % (row, addr_rb))
     bar.wr(FUSEWDATA, value)
-    wdata_rb = bar.rd(FUSEWDATA)
-    if wdata_rb != value:
-        raise Bar0Abort("FUSEWDATA did not latch 0x%08X (got 0x%08X; STOP before CMD_WRITE)" % (value, wdata_rb))
 
     # Persist IN_FLIGHT (aborted=True until verified) + fsync BEFORE irreversible CMD_WRITE.
     journal = load_journal(journal_path)
